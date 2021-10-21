@@ -12,8 +12,7 @@
 static int new_topic_open(struct inode *, struct file *); 
 static int new_topic_release(struct inode *, struct file *); 
 static ssize_t new_topic_read(struct file *, char __user *, size_t, loff_t *); 
-static ssize_t new_topic_write(struct file *, const char __user *, size_t, 
-                            loff_t *); 
+static ssize_t new_topic_write(struct file *, const char __user *, size_t, loff_t *); 
 static ssize_t subs_list_read(struct file*, char __user *, size_t, loff_t*);//might not be needed
 static ssize_t subscribe_write(struct file*, const char __user *, size_t, loff_t*);
 static ssize_t signal_nr_write(struct file*, const char __user *, size_t, loff_t*);
@@ -33,7 +32,6 @@ static int init_sub_dir(int);
 #define NEW_TOPIC_REQ_NAME "psipc/new_topic" /* Dev name as it appears in /proc/devices   */ 
 #define BUF_LEN 80 /* Max length of the message from the device */ 
 #define MAX_SUB_DIR 10
-  
  
 static int major; /* it will be the same one because they're all of the same type*/
 
@@ -75,14 +73,14 @@ static struct file_operations signal_nr_fops = {
 };
 
 static struct file_operations endpoint_fops = {
-	.write = enpoint_write,
+	.write = endpoint_write,
 	.open = endpoint_open,
 	.release = endpoint_release,
 };
 
 typedef struct exchange_node_s{
     //file_operations subscribe_fops, subscribers_list_fops, signal_nr_fops, endpoint_fops;
-	class file_dev_cls[4];
+	struct class file_dev_cls[4];
 	char *dir_name;
 }exchange_node_t;
 
@@ -144,7 +142,6 @@ static int new_topic_open(struct inode *inode, struct file *file)
     if (atomic_cmpxchg(&already_open, CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
         return -EBUSY; 
  
-    sprintf(msg, "I already told you %d times Hello world!\n", counter++); 
     try_module_get(THIS_MODULE); 
  
     return SUCCESS; 
@@ -197,8 +194,7 @@ static ssize_t new_topic_read(struct file *filp, /* see include/linux/fs.h   */
 } 
  
 /* Called when a process writes to dev file: echo "hi" > /dev/psipc/new_topic */ 
-static ssize_t new_topic_write(struct file *filp, const char __user *buff, 
-                            size_t len, loff_t *off) 
+static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) 
 { 
     int i, created_sub, path_len=0; 
     char *dir;
@@ -219,16 +215,27 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff,
     }
     strcat(strcat(dir, ROOT_DIR), msg);
     //create exchange node for subdirectory
-    node_exchange_t elem = {
-        .dir_name = dir;
-    }
-    created_sub = register_chrdev(0, dir, &)
+    exchange_node_t elem = {
+        .dir_name = dir
+    };
+    created_sub = register_chrdev(0, dir, &subscribe_fops);
     if(created_sub<0){
         pr_alert("Cannot create directory /dev/%s/%s\n", ROOT_DIR, msg);
     }
  
     return i; 
 } 
+
+static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
+//static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){}
+//static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){}
+static int subscribe_open(struct inode *inode, struct file *file){return SUCCESS;}
+//static int signal_nr_open(struct inode *inode, struct file *file){}
+//static int endpoint_open(struct inode *inode, struct file *file){}
+static int subscribe_release(struct inode *inode, struct file *file){return SUCCESS;}                      
+//static int signal_nr_release(struct inode *inode, struct file *file){}
+//static int endpoint_release(struct inode *inode, struct file *file){}
+
 
 static int init_sub_dir(int buffer_len){
 	return SUCCESS;
