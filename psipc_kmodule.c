@@ -30,10 +30,15 @@ static int init_sub_dir(int);
 #define SUCCESS 0 
 #define ROOT_DIR "psipc"
 #define NEW_TOPIC_REQ_NAME "psipc/new_topic" /* Dev name as it appears in /proc/devices   */ 
+#define TOPICS_DIR "psipc/topics/"
 #define BUF_LEN 80 /* Max length of the message from the device */ 
 #define MAX_SUB_DIR 10
+#define NUM_SPECIAL_FILES 4
+
+const char* files[] = {"/subscribe", "/subscribes_list", "/signal_nr", "/endpoint"};
  
 static int major; /* it will be the same one because they're all of the same type*/
+static int topics_counter = 0;
 
 enum { 
     CDEV_NOT_USED = 0, 
@@ -199,30 +204,60 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     int i, created_sub, path_len=0; 
     char *dir;
  
+    /*
+    Check on the number of topics when writing on new_topic
+    if(MAX_SUB_DIR == topics_counter) return;
+    else ...;
+    */
+
     pr_info("new_topic_write(%p,%p,%ld)", filp, buff, len); 
  
     for (i = 0; i < len && i < BUF_LEN; i++) 
         get_user(msg[i], buff + i); 
+
     pr_info("Written: %s\n", msg);
     msg[i] = '\0';
 
     //create new topic
-    path_len += strlen(ROOT_DIR);
+    path_len += strlen(TOPICS_DIR);
     path_len += strlen(msg);
-    if(!(dir = (char*)kmalloc(path_len, GFP_KERNEL))){
-        pr_alert("String cat error: Cannot allocate memory for %s\n", msg);
+    if(!(dir = (char*)kmalloc(path_len + 1, GFP_KERNEL))){
+        pr_alert("kmalloc error: cannot allocate memory for %s\n", msg);
         return -ENOMEM;
     }
-    strcat(strcat(dir, ROOT_DIR), msg);
+    strcpy(dir, TOPICS_DIR);
+    strcat(dir, msg);
+
     //create exchange node for subdirectory
     exchange_node_t elem = {
         .dir_name = dir
     };
-    created_sub = register_chrdev(0, dir, &subscribe_fops);
-    if(created_sub<0){
-        pr_alert("Cannot create directory /dev/%s/%s\n", ROOT_DIR, msg);
+    node_array[topics_counter++] = elem;
+
+    for(i = 0; i < NUM_SPECIAL_FILES; i++){
+        char *path = (char*)kmalloc(path_len + strlen(files[i]), GFP_KERNEL);
+        strcpy(path, dir);
+        strcat(path, files[i]);
+
+        created_sub = register_chrdev(0, path, &subscribe_fops);
+        if(created_sub<0){
+            pr_alert("Cannot create directory /dev/%s\n", path);
+        }
+        struct class *cls = class_create(THIS_MODULE, path);
+        if(IS_ERR(cls)){
+
+        }
+        cls->devnode = cls_devnode_setting; 
+        device_create(cls, NULL, MKDEV(created_sub, 0), NULL, path); 
     }
- 
+
+    //to implement
+    //TODO: save all cls in file_dev_cls
+    //TODO: remove devices files in all topic folders, for now "sudo rm -r psipc/"
+    //Check: msg buffer error sometimes?
+
+    pr_info("Device created on /dev/%s\n", dir); 
+
     return i; 
 } 
 
