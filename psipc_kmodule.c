@@ -25,6 +25,8 @@ static int subscribe_release(struct inode*, struct file*);
 static int signal_nr_release(struct inode*, struct file*);
 static int endpoint_release(struct inode*, struct file*);
 
+static void release_files(void);
+
 static int init_sub_dir(int);   
  
 #define SUCCESS 0 
@@ -124,9 +126,10 @@ static int __init chardev_init(void)
  
 static void __exit chardev_exit(void) 
 { 
+    release_files();
+    
     device_destroy(new_topic_cls, MKDEV(major, 0)); 
     class_destroy(new_topic_cls); 
- 
     unregister_chrdev(major, NEW_TOPIC_REQ_NAME); 
     pr_info("Device /dev/%s has been unregistered,\n", NEW_TOPIC_REQ_NAME);
 } 
@@ -229,15 +232,14 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     strcat(dir, msg);
 
     //create exchange node for subdirectory
-    exchange_node_t elem = {
-        .dir_name = dir
-    };
-    node_array[topics_counter++] = elem;
-
+    exchange_node_t elem;
+    elem.dir_name = dir;
+    
     for(i = 0; i < NUM_SPECIAL_FILES; i++){
         char *path = (char*)kmalloc(path_len + strlen(files[i]), GFP_KERNEL);
         strcpy(path, dir);
         strcat(path, files[i]);
+        pr_info("CREATE: %s\n", path);
 
         created_sub = register_chrdev(0, path, &subscribe_fops);
         if(created_sub<0){
@@ -249,7 +251,10 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
         }
         cls->devnode = cls_devnode_setting; 
         device_create(cls, NULL, MKDEV(created_sub, 0), NULL, path); 
+        elem.file_dev_cls[i] = *cls;
     }
+
+    node_array[topics_counter++] = elem;
 
     //to implement
     //TODO: save all cls in file_dev_cls
@@ -260,6 +265,23 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 
     return i; 
 } 
+
+static void release_files(void){
+    int n_topics, n_files;
+    for(n_topics = 0; n_topics < topics_counter; n_topics++){
+        for(n_files = 0; n_files < NUM_SPECIAL_FILES; n_files++){
+            char *str = (char*)kmalloc(strlen(node_array[n_topics].dir_name) + strlen(files[n_files]), GFP_KERNEL);
+            strcpy(str, node_array[n_topics].dir_name);
+            strcat(str, files[n_files]);
+            device_destroy(&(node_array[n_topics].file_dev_cls[n_files]), MKDEV(major, 0)); 
+            class_destroy(&(node_array[n_topics].file_dev_cls[n_files])); 
+            pr_info("%s\n", str, files[n_files]);
+            unregister_chrdev(major, str); 
+        }
+        
+        //pr_info("Device /dev/%s has been unregistered,\n", NEW_TOPIC_REQ_NAME);
+    }
+}
 
 static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
 //static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){}
