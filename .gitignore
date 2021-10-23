@@ -1,0 +1,9 @@
+#exclude
+*.cmd
+*.symvers
+*.order
+*.dwo
+*.ko
+*.mod
+*.mod.c
+*.o
