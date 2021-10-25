@@ -87,7 +87,8 @@ static struct file_operations endpoint_fops = {
 
 typedef struct exchange_node_s{
     //file_operations subscribe_fops, subscribers_list_fops, signal_nr_fops, endpoint_fops;
-	struct class file_dev_cls[4];
+	struct class file_dev_cls[NUM_SPECIAL_FILES];
+    dev_t devices[NUM_SPECIAL_FILES];
 	char *dir_name;
 }exchange_node_t;
 
@@ -214,16 +215,6 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     */
 
     pr_info("new_topic_write(%p,%p,%ld)", filp, buff, len); 
-
-    /*if(len > BUF_LEN)
-        buf_size = BUF_LEN;
-    else
-        buf_size = len;
-    
-    if(copy_from_user(msg, buff, buf_size)){
-        pr_alert("Can't copy from user\n");
-        return -EFAULT;
-    }*/
  
     for (i = 0; i < len && i < BUF_LEN; i++) 
         get_user(msg[i], buff + i);
@@ -263,7 +254,8 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
             pr_alert("ERROR_W: cannot create class for /dev/%s\n", path);
         }
         cls->devnode = cls_devnode_setting; 
-        device_create(cls, NULL, MKDEV(created_sub, 0), NULL, path); 
+        elem.devices[i] = MKDEV(created_sub, 0);
+        device_create(cls, NULL, elem.devices[i], NULL, path); 
         elem.file_dev_cls[i] = *cls;
     }
 
@@ -271,7 +263,6 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     //memset(msg, '\0', BUF_LEN);
     msg[0] = '\0';
     //to implement
-    //TODO: save all cls in file_dev_cls
     //TODO: remove devices files in all topic folders, for now "sudo rm -r psipc/"
     //Check: msg buffer error sometimes?
 
@@ -287,10 +278,11 @@ static void release_files(void){
             char *str = (char*)kmalloc(strlen(node_array[n_topics].dir_name) + strlen(files[n_files]), GFP_KERNEL);
             strcpy(str, node_array[n_topics].dir_name);
             strcat(str, files[n_files]);
-            device_destroy(&(node_array[n_topics].file_dev_cls[n_files]), MKDEV(major, 0)); 
+            device_destroy(&(node_array[n_topics].file_dev_cls[n_files]), node_array[n_topics].devices[n_files]); 
             class_destroy(&(node_array[n_topics].file_dev_cls[n_files])); 
             pr_info("%s\n", str, files[n_files]);
             unregister_chrdev(major, str); 
+            kfree(str);
         }
         
         //pr_info("Device /dev/%s has been unregistered,\n", NEW_TOPIC_REQ_NAME);
