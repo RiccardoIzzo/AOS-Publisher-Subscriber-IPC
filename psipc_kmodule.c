@@ -204,7 +204,7 @@ static ssize_t new_topic_read(struct file *filp, /* see include/linux/fs.h   */
 /* Called when a process writes to dev file: echo "hi" > /dev/psipc/new_topic */ 
 static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) 
 { 
-    int i, created_sub, path_len=0, buf_size; 
+    int i, created_sub, path_len=0, buf_size, msg_len; 
     char *dir;
  
     /*
@@ -228,6 +228,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     for (i = 0; i < len && i < BUF_LEN; i++) 
         get_user(msg[i], buff + i);
 
+    msg_len = i;
     pr_info("Written: %s\n", msg);
     msg[i-1] = '\0';
     //msg[buf_size-1] = '\0';
@@ -236,7 +237,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     path_len += strlen(TOPICS_DIR);
     path_len += strlen(msg);
     pr_info("WRITE: path total len %d, sub_dir len %d\n", path_len, strlen(msg));
-    if(!(dir = (char*)kmalloc(path_len + 1, GFP_KERNEL))){
+    if(!(dir = (char*)kmalloc(path_len, GFP_KERNEL))){
         pr_alert("ERROR_W_KM: cannot allocate memory for %s\n", msg);
         return -ENOMEM;
     }
@@ -274,10 +275,9 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     //TODO: remove devices files in all topic folders, for now "sudo rm -r psipc/"
     //Check: msg buffer error sometimes?
 
-    pr_info("CREATE_W: Device created on /dev/%s\n", dir); 
+    pr_info("CREATE_W: Device created on /dev/%s\n", dir);
     
-
-    return i; 
+    return msg_len; 
 } 
 
 static void release_files(void){
