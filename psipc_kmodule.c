@@ -8,6 +8,7 @@
 #include <linux/module.h> 
 #include <linux/poll.h> 
 #include <linux/string.h>
+#include <linux/list.h>
 
 static int new_topic_open(struct inode *, struct file *); 
 static int new_topic_release(struct inode *, struct file *); 
@@ -25,9 +26,8 @@ static int subscribe_release(struct inode*, struct file*);
 static int signal_nr_release(struct inode*, struct file*);
 static int endpoint_release(struct inode*, struct file*);
 
-static void release_files(void);
-
-static int init_sub_dir(int);   
+static void release_files(void); 
+static void display_list(void);  
  
 #define SUCCESS 0 
 #define ROOT_DIR "psipc"
@@ -85,14 +85,16 @@ static struct file_operations endpoint_fops = {
 	.release = endpoint_release,
 };
 
-typedef struct exchange_node_s{
+static struct exchange_node_s{
     //file_operations subscribe_fops, subscribers_list_fops, signal_nr_fops, endpoint_fops;
 	struct class file_dev_cls[NUM_SPECIAL_FILES];
     dev_t devices[NUM_SPECIAL_FILES];
 	char *dir_name;
-}exchange_node_t;
+    struct list_head list;
+};
 
-static exchange_node_t node_array[MAX_SUB_DIR];
+static struct list_head topicsHead;
+//static exchange_node_t node_array[MAX_SUB_DIR];
 
 //to set device permissions
 static char *cls_devnode_setting(struct device *dev, umode_t *mode){
@@ -102,8 +104,9 @@ static char *cls_devnode_setting(struct device *dev, umode_t *mode){
     return NULL;
 }
 
-static int __init chardev_init(void) 
+static int __init chardev_init(void)
 { 
+    INIT_LIST_HEAD(&topicsHead);
     major = register_chrdev(0, NEW_TOPIC_REQ_NAME, &new_topic_dev_fops); 
  
     if (major < 0) { 
@@ -132,7 +135,7 @@ static void __exit chardev_exit(void)
     device_destroy(new_topic_cls, MKDEV(major, 0)); 
     class_destroy(new_topic_cls); 
     unregister_chrdev(major, NEW_TOPIC_REQ_NAME); 
-    pr_info("Device /dev/%s has been unregistered,\n", NEW_TOPIC_REQ_NAME);
+    pr_info("Device /dev/%s has been unregistered.\n", NEW_TOPIC_REQ_NAME);
 } 
  
 /* Methods */ 
@@ -236,8 +239,13 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     strcat(dir, msg);
 
     //create exchange node for subdirectory
-    exchange_node_t elem;
-    elem.dir_name = dir;
+    struct exchange_node_s *elem;
+    elem = (struct exchange_node_s*)kmalloc(sizeof(*elem), GFP_KERNEL);
+    if(elem==NULL){
+        pr_alert("ERROR_W: cannot allocae exchange node\n");
+        return msg_len;
+    }
+    elem->dir_name = dir;
     
     for(i = 0; i < NUM_SPECIAL_FILES; i++){
         char *path = (char*)kmalloc(path_len + strlen(files[i]), GFP_KERNEL);
@@ -254,12 +262,12 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
             pr_alert("ERROR_W: cannot create class for /dev/%s\n", path);
         }
         cls->devnode = cls_devnode_setting; 
-        elem.devices[i] = MKDEV(created_sub, 0);
-        device_create(cls, NULL, elem.devices[i], NULL, path); 
-        elem.file_dev_cls[i] = *cls;
+        elem->devices[i] = MKDEV(created_sub, 0);
+        device_create(cls, NULL, elem->devices[i], NULL, path); 
+        elem->file_dev_cls[i] = *cls;
     }
-
-    node_array[topics_counter++] = elem;
+    list_add(&(elem->list), &topicsHead);
+    //ode_array[topics_counter++] = elem;
     //memset(msg, '\0', BUF_LEN);
     msg[0] = '\0';
     //to implement
@@ -267,13 +275,47 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     //Check: msg buffer error sometimes?
 
     pr_info("CREATE_W: Device created on /dev/%s\n", dir);
+
+    display_list();
     
     return msg_len; 
 } 
 
 static void release_files(void){
     int n_topics, n_files;
-    for(n_topics = 0; n_topics < topics_counter; n_topics++){
+    struct list_head *ptr, *temp;
+    struct exchange_node_s *entry, *entry_temp;
+
+    if(!list_empty(&topicsHead)){
+        entry = list_first_entry_or_null(&topicsHead, struct exchange_node_s, list);
+
+        if(entry == NULL){
+            pr_alert("No topic to delete!\n");
+            return;
+        }
+
+        list_for_each_safe(ptr, temp, &topicsHead){
+            entry_temp = list_entry(ptr, struct exchange_node_s, list);
+            if(entry_temp!=NULL){
+                for(n_files=0; n_files < NUM_SPECIAL_FILES; n_files++){
+                    char *str = (char*)kmalloc(strlen(entry_temp->dir_name) + strlen(files[n_files]), GFP_KERNEL);
+                    strcpy(str, entry_temp->dir_name);
+                    strcat(str, files[n_files]);
+                    device_destroy(&(entry_temp->file_dev_cls[n_files]), entry_temp->devices[n_files]);
+                    class_destroy(&(entry_temp->file_dev_cls[n_files]));
+                    pr_info("DESTROY: %s/%s\n", str, files[n_files]);
+                    unregister_chrdev(major, str);
+                    kfree(str);
+                }
+                if(ptr!=NULL){
+                    list_del(ptr);
+                }else
+                    pr_alert("ERROR_RELEASE: no pointer to free\n");
+            }else
+                pr_alert("ALERT:null entry\n");
+        }
+    }
+    /*for(n_topics = 0; n_topics < topics_counter; n_topics++){
         for(n_files = 0; n_files < NUM_SPECIAL_FILES; n_files++){
             char *str = (char*)kmalloc(strlen(node_array[n_topics].dir_name) + strlen(files[n_files]), GFP_KERNEL);
             strcpy(str, node_array[n_topics].dir_name);
@@ -286,6 +328,24 @@ static void release_files(void){
         }
         
         //pr_info("Device /dev/%s has been unregistered,\n", NEW_TOPIC_REQ_NAME);
+    }*/
+}
+
+static void display_list(void){
+    int i=0;
+    struct list_head *ptr;
+    struct exchange_node_s *entry, *entry_ptr;
+
+    entry = list_first_entry_or_null(&topicsHead, struct exchange_node_s, list);
+    if(entry==NULL){
+        pr_alert("ERROR: list is empty\n");
+        return;
+    }else{
+    pr_info("-------BEGIN_LIST--------\n");
+    list_for_each_entry(entry_ptr, &topicsHead, list){
+        pr_info("Topic[%d]\n\tDir: %s\n", i++, entry_ptr->dir_name);
+    }
+    pr_info("------------END_LIST-------\n\n");
     }
 }
 
@@ -298,11 +358,6 @@ static int subscribe_open(struct inode *inode, struct file *file){return SUCCESS
 static int subscribe_release(struct inode *inode, struct file *file){return SUCCESS;}                      
 //static int signal_nr_release(struct inode *inode, struct file *file){}
 //static int endpoint_release(struct inode *inode, struct file *file){}
-
-
-static int init_sub_dir(int buffer_len){
-	return SUCCESS;
-}
 
  
 module_init(chardev_init); 
