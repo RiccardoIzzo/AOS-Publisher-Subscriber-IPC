@@ -21,13 +21,18 @@ static ssize_t endpoint_write(struct file*, const char __user *, size_t, loff_t*
 
 static int subscribe_open(struct inode*, struct file*);
 static int signal_nr_open(struct inode*, struct file*);
-static int endpoint_open(struct inode*, struct file*);   
-static int subscribe_release(struct inode*, struct file*);                       
+static int endpoint_open(struct inode*, struct file*);
+static int subs_list_open(struct inode*, struct file*);   
+static int subscribe_release(struct inode*, struct file*);                   
 static int signal_nr_release(struct inode*, struct file*);
 static int endpoint_release(struct inode*, struct file*);
+static int subs_list_release(struct inode*, struct file*);
 
 static void release_files(void); 
-static void display_list(void);  
+static void display_list(void);
+static void display_pid_list(struct list_head*);
+static struct exchange_node_s* search_node(char*);  
+static int pro_atoi(char*);
  
 #define SUCCESS 0 
 #define ROOT_DIR "psipc"
@@ -63,43 +68,69 @@ static struct file_operations new_topic_dev_fops = {
 };
 
 static struct file_operations subscribe_fops = {
+    .owner = THIS_MODULE,
     .write = subscribe_write,
     .open = subscribe_open,
     .release = subscribe_release,
 };
 
 static struct file_operations subscribers_list_fops = {
+    .owner = THIS_MODULE,
     .read = subs_list_read,
-    //cannot be open from user mode
+    .open = subs_list_open,
+    .release = subs_list_release,
 }; 
 
 static struct file_operations signal_nr_fops = {
+    .owner = THIS_MODULE,
 	.write = signal_nr_write,
 	.open = signal_nr_open,
 	.release = signal_nr_release,
 };
 
 static struct file_operations endpoint_fops = {
+    .owner = THIS_MODULE,
 	.write = endpoint_write,
 	.open = endpoint_open,
 	.release = endpoint_release,
 };
 
 static struct exchange_node_s{
-    //file_operations subscribe_fops, subscribers_list_fops, signal_nr_fops, endpoint_fops;
 	struct class file_dev_cls[NUM_SPECIAL_FILES];
     dev_t devices[NUM_SPECIAL_FILES];
 	char *dir_name;
+    //dentry *dentry;
+    struct list_head subscribers_list_head; //list for pids, unsigned int
+    int nr_signal;
+    //endpoint file data? It should be a real file
+    struct list_head list;
+};
+
+static struct subscribers_pid_s{
+    int pid;
     struct list_head list;
 };
 
 static struct list_head topicsHead;
-//static exchange_node_t node_array[MAX_SUB_DIR];
 
 //to set device permissions
 static char *cls_devnode_setting(struct device *dev, umode_t *mode){
     if(mode!=NULL){
         *mode = (umode_t)0666;
+    }
+    return NULL;
+}
+
+static char *cls_set_writeOnly_permission(struct device *dev, umode_t *mode){
+    if(mode!=NULL){
+        *mode = (umode_t)0622;
+    }
+    return NULL;
+}
+
+static char *cls_set_readOnly_permission(struct device *dev, umode_t *mode){
+    if(mode!=NULL){
+        *mode = (umode_t)0644;
     }
     return NULL;
 }
@@ -138,11 +169,6 @@ static void __exit chardev_exit(void)
     pr_info("Device /dev/%s has been unregistered.\n", NEW_TOPIC_REQ_NAME);
 } 
  
-/* Methods */ 
- 
-/* Called when a process tries to open the device file, like 
- * "sudo cat /dev/chardev" 
- */ 
 static int new_topic_open(struct inode *inode, struct file *file) 
 { 
     static int counter = 0; 
@@ -159,23 +185,15 @@ static int new_topic_open(struct inode *inode, struct file *file)
     return SUCCESS; 
 } 
  
-/* Called when a process closes the device file. */ 
 static int new_topic_release(struct inode *inode, struct file *file) 
-{ 
-    /* We're now ready for our next caller */ 
+{  
     atomic_set(&already_open, CDEV_NOT_USED); 
  
-    /* Decrement the usage count, or else once you opened the file, you will 
-     * never get get rid of the module. 
-     */ 
     module_put(THIS_MODULE); 
  
     return SUCCESS; 
 } 
  
-/* Called when a process, which already opened the dev file, attempts to 
- * read from it. 
- */ 
 static ssize_t new_topic_read(struct file *filp, /* see include/linux/fs.h   */ 
                            char __user *buffer, /* buffer to fill with data */ 
                            size_t length, /* length of the buffer     */ 
@@ -261,18 +279,21 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
         if(IS_ERR(cls)){
             pr_alert("ERROR_W: cannot create class for /dev/%s\n", path);
         }
-        cls->devnode = cls_devnode_setting; 
+        if(i==0 || i==2){//subscribe + nr_signal files
+            cls->devnode = cls_set_writeOnly_permission;
+        }else if(i==1){ //subscribers_list files
+            cls->devnode = cls_set_readOnly_permission;
+        }else{
+            cls->devnode = cls_devnode_setting; 
+        }
         elem->devices[i] = MKDEV(created_sub, 0);
         device_create(cls, NULL, elem->devices[i], NULL, path); 
         elem->file_dev_cls[i] = *cls;
     }
+    INIT_LIST_HEAD(&(elem->subscribers_list_head));
     list_add(&(elem->list), &topicsHead);
-    //ode_array[topics_counter++] = elem;
-    //memset(msg, '\0', BUF_LEN);
+
     msg[0] = '\0';
-    //to implement
-    //TODO: remove devices files in all topic folders, for now "sudo rm -r psipc/"
-    //Check: msg buffer error sometimes?
 
     pr_info("CREATE_W: Device created on /dev/%s\n", dir);
 
@@ -283,7 +304,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 
 static void release_files(void){
     int n_topics, n_files;
-    struct list_head *ptr, *temp;
+    struct list_head *ptr, *ptr2, *temp, *temp2;
     struct exchange_node_s *entry, *entry_temp;
 
     if(!list_empty(&topicsHead)){
@@ -297,6 +318,14 @@ static void release_files(void){
         list_for_each_safe(ptr, temp, &topicsHead){
             entry_temp = list_entry(ptr, struct exchange_node_s, list);
             if(entry_temp!=NULL){
+                if(!list_empty(&(entry_temp->subscribers_list_head))){
+                    list_for_each_safe(ptr2, temp2, &(entry_temp->subscribers_list_head)){
+                        list_del(ptr2);
+                    }
+                }else{
+                    pr_alert("No pid list to free\n");
+                }
+                pr_info("All pid freed\n");
                 for(n_files=0; n_files < NUM_SPECIAL_FILES; n_files++){
                     char *str = (char*)kmalloc(strlen(entry_temp->dir_name) + strlen(files[n_files]), GFP_KERNEL);
                     strcpy(str, entry_temp->dir_name);
@@ -315,20 +344,6 @@ static void release_files(void){
                 pr_alert("ALERT:null entry\n");
         }
     }
-    /*for(n_topics = 0; n_topics < topics_counter; n_topics++){
-        for(n_files = 0; n_files < NUM_SPECIAL_FILES; n_files++){
-            char *str = (char*)kmalloc(strlen(node_array[n_topics].dir_name) + strlen(files[n_files]), GFP_KERNEL);
-            strcpy(str, node_array[n_topics].dir_name);
-            strcat(str, files[n_files]);
-            device_destroy(&(node_array[n_topics].file_dev_cls[n_files]), node_array[n_topics].devices[n_files]); 
-            class_destroy(&(node_array[n_topics].file_dev_cls[n_files])); 
-            pr_info("%s\n", str, files[n_files]);
-            unregister_chrdev(major, str); 
-            kfree(str);
-        }
-        
-        //pr_info("Device /dev/%s has been unregistered,\n", NEW_TOPIC_REQ_NAME);
-    }*/
 }
 
 static void display_list(void){
@@ -349,16 +364,102 @@ static void display_list(void){
     }
 }
 
-static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
+static void display_pid_list(struct list_head *head){
+    struct subscribers_pid_s *ptr;
+    int i=0;
+
+    pr_info("-------PID-LIST------\n");
+    list_for_each_entry(ptr, head, list){
+        pr_info("Pid[%d]: %d\n", i, ptr->pid);
+    }
+    pr_info("---------END_PID------\n\n");
+}
+
+static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
+    int i, msg_len;
+    char *dentry;
+    struct exchange_node_s *node;
+    struct subscribers_pid_s* pid_node;
+ 
+    for (i = 0; i < len && i < BUF_LEN; i++) 
+        get_user(msg[i], buff + i);
+
+    msg_len = i;
+    pr_info("Written: %s\n", msg);
+    msg[i-1] = '\0';
+
+    pid_node = (struct subscribers_pid_s*)kmalloc(sizeof(struct subscribers_pid_s), GFP_KERNEL);
+    if(pid_node==NULL){
+        pr_alert("Huston abbiamo un problema\n");
+        return msg_len;
+    }
+    pid_node->pid = pro_atoi(msg);
+    if(pid_node->pid <0){
+        pr_alert("ERROR: %s is not a pid\n", msg);
+        return msg_len;
+    }
+
+    dentry = filp->f_path.dentry->d_parent->d_iname;
+    pr_info("Dentry to search: %s\n", dentry),
+    node = search_node(dentry);
+    if(node==NULL){
+        pr_alert("Huston abbiamo un secondo problema\n");
+        return msg_len;
+    }
+    list_add(&(pid_node->list), &(node->subscribers_list_head));
+    pr_info("Added pid node to list\n");
+
+    display_pid_list(&(node->subscribers_list_head));
+    
+    return msg_len; //remember to return nr written bytes
+}
 //static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){}
 //static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){}
-static int subscribe_open(struct inode *inode, struct file *file){return SUCCESS;}
+static int subscribe_open(struct inode *inode, struct file *file){
+    //spin_lock(&(file->spinlock)); //best not using spinlocks, semaphore are better coz it's okay if the execution is preempted
+    try_module_get(THIS_MODULE);
+
+    return SUCCESS;
+}
 //static int signal_nr_open(struct inode *inode, struct file *file){}
 //static int endpoint_open(struct inode *inode, struct file *file){}
-static int subscribe_release(struct inode *inode, struct file *file){return SUCCESS;}                      
+static int subscribe_release(struct inode *inode, struct file *file){
+    //spin_unlock(&(file->spinlock));//not use spinlocks, use semaphore
+    module_put(THIS_MODULE);
+    return SUCCESS;
+}                      
 //static int signal_nr_release(struct inode *inode, struct file *file){}
 //static int endpoint_release(struct inode *inode, struct file *file){}
 
+static struct exchange_node_s* search_node(char *dir){
+    char *path;
+    struct exchange_node_s *ptr;
+
+    path = (char*)kmalloc(strlen(TOPICS_DIR) + strlen(dir), GFP_KERNEL);
+    strcpy(path, TOPICS_DIR);
+    strcat(path, dir);
+    pr_info("Search for dentry %s\n", path);
+    list_for_each_entry(ptr, &topicsHead, list){
+        if(strcmp(ptr->dir_name, path)==0){
+            pr_info("Node found!\n");
+            return ptr;
+        }
+    }
+    return NULL;
+}
+
+static int pro_atoi(char *s){
+    int n=0, i;
+
+    for(i=0; s[i]!='\0'; i++){
+        if(s[i]<'0'  || s[i]>'9'){
+            pr_alert("%s is not a pid\n", s);
+            return -1;
+        }
+        n = n*10 + (s[i] - '0');
+    }
+    return n;
+}
  
 module_init(chardev_init); 
 module_exit(chardev_exit); 
