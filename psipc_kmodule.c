@@ -41,11 +41,13 @@ static int pro_atoi(char*);
 #define BUF_LEN 100 /* Max length of the message from the device */ 
 #define MAX_SUB_DIR 10
 #define NUM_SPECIAL_FILES 4
+#define MAX_SIZE_PID 10
 
 
  
 static int major; /* it will be the same one because they're all of the same type*/
 static int topics_counter = 0;
+static int flag = 0;
 
 enum { 
     CDEV_NOT_USED = 0, 
@@ -424,25 +426,48 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
 
 static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
     int bytes_read = 0; 
-    const char *msg_ptr = msg; 
- 
-    if (!*(msg_ptr + *offset)) {
-        *offset = 0;
-        return 0; 
-    } 
- 
-    msg_ptr += *offset; 
+    struct subscribers_pid_s *ptr;
+    struct exchange_node_s *node;
+    char *dentry;
 
-    while (length && *msg_ptr) { 
-        put_user(*(msg_ptr++), buffer++); 
-        length--; 
-        bytes_read++; 
+    if (flag) { //we are at the end of message 
+        pr_info("Exit.\n");
+        flag = 0;
+        *offset = 0; //reset the offset 
+        return 0; // signify end of file
     } 
- 
+
+    dentry = filp->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    list_for_each_entry(ptr, &(node->subscribers_list_head), list){
+        int len, i = 0;
+        char *str;
+        str = (char*)kmalloc(MAX_SIZE_PID, GFP_KERNEL);
+        snprintf(str, MAX_SIZE_PID, "%d", ptr->pid);
+        const char *msg_ptr = str; 
+    
+        len = strlen(str);
+
+        /* Actually put the data into the buffer */ 
+        while (len > 0) { 
+            put_user(msg_ptr[i++], buffer++);
+            len--; 
+            bytes_read++;
+        } 
+        put_user(' ', buffer++);
+        bytes_read++;
+    }
+
+    put_user('\n', buffer++);
+    bytes_read++;
+
     *offset += bytes_read; 
-  
-    return bytes_read; 
+    flag = 1;
+    
+    return bytes_read;
 }
+
 static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
 static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
 static int subscribe_open(struct inode *inode, struct file *file){
