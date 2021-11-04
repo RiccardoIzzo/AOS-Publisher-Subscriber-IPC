@@ -42,7 +42,7 @@ static int pro_atoi(char*);
 #define MAX_SUB_DIR 10
 #define NUM_SPECIAL_FILES 4
 
-const char* files[] = {"/subscribe", "/subscribes_list", "/signal_nr", "/endpoint"};
+
  
 static int major; /* it will be the same one because they're all of the same type*/
 static int topics_counter = 0;
@@ -54,6 +54,7 @@ enum {
  
 /* Is device open? Used to prevent multiple access to device */ 
 static atomic_t already_open = ATOMIC_INIT(CDEV_NOT_USED); 
+static atomic_t subscribers_list_already_open = ATOMIC_INIT(CDEV_NOT_USED);
  
 static char msg[BUF_LEN]; /* The msg the device will give when asked */ 
  
@@ -113,6 +114,10 @@ static struct subscribers_pid_s{
 
 static struct list_head topicsHead;
 
+const char* files[] = {"/subscribe", "/subscribers_list", "/signal_nr", "/endpoint"};
+
+const struct file_operations* fops[] = {&subscribe_fops, &subscribers_list_fops, &signal_nr_fops, &endpoint_fops};
+
 //to set device permissions
 static char *cls_devnode_setting(struct device *dev, umode_t *mode){
     if(mode!=NULL){
@@ -134,6 +139,7 @@ static char *cls_set_readOnly_permission(struct device *dev, umode_t *mode){
     }
     return NULL;
 }
+
 
 static int __init chardev_init(void)
 { 
@@ -271,7 +277,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
         strcat(path, files[i]);
         pr_info("CREATE: %s\n", path);
 
-        created_sub = register_chrdev(0, path, &subscribe_fops);
+        created_sub = register_chrdev(0, path, fops[i]);
         if(created_sub<0){
             pr_alert("ERROR_W: Cannot create directory /dev/%s\n", path);
         }
@@ -410,26 +416,63 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
     pr_info("Added pid node to list\n");
 
     display_pid_list(&(node->subscribers_list_head));
+
+    msg[0] = '\0';
     
     return msg_len; //remember to return nr written bytes
 }
-//static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){}
-//static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){}
+
+static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
+    int bytes_read = 0; 
+    const char *msg_ptr = msg; 
+ 
+    if (!*(msg_ptr + *offset)) {
+        *offset = 0;
+        return 0; 
+    } 
+ 
+    msg_ptr += *offset; 
+
+    while (length && *msg_ptr) { 
+        put_user(*(msg_ptr++), buffer++); 
+        length--; 
+        bytes_read++; 
+    } 
+ 
+    *offset += bytes_read; 
+  
+    return bytes_read; 
+}
+static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
+static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
 static int subscribe_open(struct inode *inode, struct file *file){
     //spin_lock(&(file->spinlock)); //best not using spinlocks, semaphore are better coz it's okay if the execution is preempted
     try_module_get(THIS_MODULE);
 
     return SUCCESS;
 }
-//static int signal_nr_open(struct inode *inode, struct file *file){}
-//static int endpoint_open(struct inode *inode, struct file *file){}
+
+static int subs_list_open(struct inode *inode, struct file *file){
+    if (atomic_cmpxchg(&subscribers_list_already_open, CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
+        return -EBUSY; 
+    try_module_get(THIS_MODULE);
+    return SUCCESS;
+}
+static int signal_nr_open(struct inode *inode, struct file *file){return -1;}
+static int endpoint_open(struct inode *inode, struct file *file){return -1;}
 static int subscribe_release(struct inode *inode, struct file *file){
     //spin_unlock(&(file->spinlock));//not use spinlocks, use semaphore
     module_put(THIS_MODULE);
     return SUCCESS;
-}                      
-//static int signal_nr_release(struct inode *inode, struct file *file){}
-//static int endpoint_release(struct inode *inode, struct file *file){}
+}  
+
+static int subs_list_release(struct inode *inode, struct file *file){
+    atomic_set(&subscribers_list_already_open, CDEV_NOT_USED);
+    module_put(THIS_MODULE);
+    return SUCCESS;
+}
+static int signal_nr_release(struct inode *inode, struct file *file){return -1;}
+static int endpoint_release(struct inode *inode, struct file *file){return -1;}
 
 static struct exchange_node_s* search_node(char *dir){
     char *path;
