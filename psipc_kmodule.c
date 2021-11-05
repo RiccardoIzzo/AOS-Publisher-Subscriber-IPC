@@ -41,7 +41,8 @@ static void release_files(void);
 static void display_list(void);
 static void display_pid_list(struct list_head*);
 static struct topic_node* search_node(char*);  
-static int pro_atoi(char*);
+static int pid_atoi(char*);
+static int signal_atoi(char*);
  
 #define SUCCESS 0 
 #define NEW_TOPIC_PATH "psipc/new_topic" /* Device name as it appears in /proc/devices */ 
@@ -326,7 +327,6 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 
     msg[0] = '\0';
 
-    pr_info("Device files created on /dev/%s\n", dir);
     display_list();
     
     return bytes_written; 
@@ -372,9 +372,8 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
         pr_alert("Kmalloc error: cannot allocate memory for the pid_node\n");
         return -ENOMEM;
     }
-    
-    pid_node->pid = pro_atoi(msg);
-    if(pid_node->pid < 0){
+    pid_node->pid = pid_atoi(msg);
+    if(pid_node->pid <0){
         pr_alert("ERROR: %s is not a pid\n", msg);
         return bytes_written;
     }
@@ -466,18 +465,55 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
 /*
 * Called whenever a process attempts to open the signal_nr device file.
 */
-static int signal_nr_open(struct inode *inode, struct file *file){return -1;}
+static int signal_nr_open(struct inode *inode, struct file *file){
+    try_module_get(THIS_MODULE);
+    return SUCCESS;
+}
 
 /* 
 * Called when a process closes the signal_nr device file.
 */
-static int signal_nr_release(struct inode *inode, struct file *file){return -1;}
+static int signal_nr_release(struct inode *inode, struct file *file){
+    module_put(THIS_MODULE);
+    return SUCCESS;
+}
 
 /* 
 * Called when a process writes to the signal_nr device file
 * echo "test" > /dev/psipc/signal_nr
 */
-static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
+/*Each time publisher rewrites on signal_nr file, the signal is overwritten.*/
+static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
+    int i, written_bytes=0, signal_nr;
+    char* dentry;
+    struct topic_node *node;
+
+    for (i = 0; i < len && i < BUF_LEN; i++) 
+        get_user(msg[i], buff + i);
+
+    written_bytes = i;
+    pr_info("Written: %s\n", msg);
+    msg[i-1] = '\0';
+
+    dentry = filp->f_path.dentry->d_parent->d_iname;
+    pr_info("Dentry to search: %s\n", dentry);
+    node = search_node(dentry);
+    if(node==NULL){
+        pr_alert("Node not found\n");
+        return EFAULT;
+    }
+
+    signal_nr = signal_atoi(msg);
+    if(signal_nr==EINVAL)
+        return EINVAL;
+    node->nr_signal = signal_nr;
+
+    pr_info("Signal written: %d\n", node->nr_signal);
+    msg[0]='\0';
+
+    return written_bytes;
+}
+
 
 
 /*
@@ -494,6 +530,7 @@ static int endpoint_release(struct inode *inode, struct file *file){return -1;}
 * Called when a process writes to the endpoint device file
 * echo "test" > /dev/psipc/endpoint
 */
+
 static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
 
 /*
@@ -579,6 +616,7 @@ static void display_pid_list(struct list_head *head){
     pr_info("---------END_PID_LIST------\n\n");
 }
 
+
 /*
 * It searches in the list the correct topic_node given the topic path.
 */
@@ -605,18 +643,42 @@ static struct topic_node* search_node(char *dir){
 }
 
 /*
-* Custom atoi function that converts a string to int.
+* Convert string of numbers into an integer pid (non-negative). Return EINVAL if s is not a pid.
 */
-static int pro_atoi(char *s){
+static int pid_atoi(char *s){
     int n=0, i;
 
     for(i=0; s[i]!='\0'; i++){
         if(s[i]<'0'  || s[i]>'9'){
-            pr_alert("%s is not a pid\n", s);
+            pr_alert("%s is not a number\n", s);
             return -1;
         }
         n = n*10 + (s[i] - '0');
     }
+    return n;
+}
+/*
+* Convert string of numbers into an integer. Return EIVAL if s does not represent  an integer.
+*/
+static int signal_atoi(char *s){
+    int n=0, i;
+    char negative_flag = '0'; //0:positive number, 1: negative
+
+    for(i=0; s[i]!='\0'; i++){
+        if(s[i]!='-' && (s[i]<'0' || s[i]>'9') || (s[i]=='-' && i!=0)){
+            pr_alert("%s is not a number\n", s);
+            return EINVAL;
+        }
+        if(s[i]=='-')
+            negative_flag = '1';
+        else{
+            n = n*10 + (s[i] - '0');
+        }
+    }
+
+    if(negative_flag=='1')
+        n = -n;
+    
     return n;
 }
  
