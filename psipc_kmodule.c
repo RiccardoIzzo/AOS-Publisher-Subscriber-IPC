@@ -96,6 +96,7 @@ static struct topic_node{
     struct list_head pid_list_head; /* head of list of struct pid_node */
     int signal_nr; /* type of signal to send to all the topic subscribers */
     struct list_head list;
+    char *endpoint_msg;
 };
 
 static struct pid_node{
@@ -562,6 +563,15 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         pr_alert("Node not found\n");
         return EFAULT;
     }
+    /*DISCARDING THE OLD MESSAGE: what if not all of the subscribers read it?*/
+    if(node->endpoint_msg!=NULL){
+        kfree(node->endpoint_msg);
+    }
+    node->endpoint_msg = (char*)kmalloc(sizeof(written_bytes+1), GFP_KERNEL);
+    if(node->endpoint_msg==NULL){
+        pr_alert("ERROR:memory not allocated for node->endpoint_msg\n");
+    }
+    strcpy(node->endpoint_msg, msg);
 
     if((node->signal_nr)==-1){
         pr_info("Publisher hasn't specified the signal to send to subrisbers. No signal will be sent.\n");
