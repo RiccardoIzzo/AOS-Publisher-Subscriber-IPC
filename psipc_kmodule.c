@@ -15,7 +15,6 @@
 //new_topic functions
 static int new_topic_open(struct inode *, struct file *); 
 static int new_topic_release(struct inode *, struct file *); 
-static ssize_t new_topic_read(struct file *, char __user *, size_t, loff_t *); 
 static ssize_t new_topic_write(struct file *, const char __user *, size_t, loff_t *); 
 
 //subscribe functions
@@ -55,7 +54,6 @@ static int signal_atoi(char*);
  
 static struct file_operations new_topic_dev_fops = { 
 	.owner = THIS_MODULE,
-    .read = new_topic_read, 
     .write = new_topic_write, 
     .open = new_topic_open, 
     .release = new_topic_release, 
@@ -176,7 +174,7 @@ static int __init chardev_init(void)
     if(IS_ERR(new_topic_cls)){
 
     }
-    new_topic_cls->devnode = cls_set_readAndWrite_permission; 
+    new_topic_cls->devnode = cls_set_writeOnly_permission; 
     device_create(new_topic_cls, NULL, MKDEV(major, 0), NULL, NEW_TOPIC_PATH); 
  
     pr_info("Device created on /dev/%s\n", NEW_TOPIC_PATH); 
@@ -227,39 +225,7 @@ static int new_topic_release(struct inode *inode, struct file *file)
     module_put(THIS_MODULE); 
  
     return SUCCESS; 
-} 
-
-/*
-* Called when a process, which already opened the new_topic device file, attempts to read from it.
-*/
-static ssize_t new_topic_read(struct file *filp,
-                           char __user *buffer, /* user buffer to fill with data */ 
-                           size_t length, /* length of the buffer */ 
-                           loff_t *offset) 
-{ 
-    /* Number of bytes actually written to the buffer */ 
-    int bytes_read = 0; 
-    const char *msg_ptr = msg; 
- 
-    if (!*(msg_ptr + *offset)) { /* we are at the end of message */ 
-        *offset = 0; /* reset the offset */ 
-        return 0; /* signify end of file */ 
-    } 
- 
-    msg_ptr += *offset; 
- 
-    /* Actually put the data into the buffer */ 
-    while (length && *msg_ptr) { 
-        put_user(*(msg_ptr++), buffer++); 
-        length--; 
-        bytes_read++; 
-    } 
- 
-    *offset += bytes_read; 
- 
-    /* Return the number of bytes put into the buffer. */ 
-    return bytes_read; 
-} 
+}
  
 /* 
 * Called when a process writes to the new_topic device file
@@ -694,7 +660,7 @@ static struct topic_node* search_node(char *dir){
     path = (char*)kmalloc(strlen(TOPICS_PATH) + strlen(dir), GFP_KERNEL);
     if(path==NULL){
         pr_alert("Kmalloc error: cannot allocate memory for the path\n");
-        return NULL;;
+        return NULL;
     }
 
     strcpy(path, TOPICS_PATH);
