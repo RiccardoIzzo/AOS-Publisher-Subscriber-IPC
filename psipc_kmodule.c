@@ -604,6 +604,10 @@ static void release_files(void){
                     unregister_chrdev(major, str);
                     kfree(str);
                 }
+                if(entry_temp->endpoint_msg!=NULL){
+                    kfree(entry_temp->endpoint_msg);
+                    pr_info("Endpoint message freed\n");
+                }
                 if(ptr1!=NULL){
                     list_del(ptr1);
                 }else
