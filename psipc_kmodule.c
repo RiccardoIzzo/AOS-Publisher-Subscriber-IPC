@@ -9,6 +9,8 @@
 #include <linux/poll.h> 
 #include <linux/string.h>
 #include <linux/list.h>
+#include <linux/signal.h>
+#include <linux/types.h>
 
 //new_topic functions
 static int new_topic_open(struct inode *, struct file *); 
@@ -91,8 +93,8 @@ static struct topic_node{
     char *dir_name; /* path name of the topic */
 	struct class file_dev_cls[NUM_SPECIAL_FILES]; /* array of struct class, one for every device files */
     dev_t devices[NUM_SPECIAL_FILES]; /* array of dev_t, one for every device files, used to store device numbers*/
-    struct list_head pidListHead; /* head of list of struct pid_node */
-    int nr_signal; /* type of signal to send to all the topic subscribers */
+    struct list_head pid_list_head; /* head of list of struct pid_node */
+    int signal_nr; /* type of signal to send to all the topic subscribers */
     struct list_head list;
 };
 
@@ -292,6 +294,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
         return -ENOMEM;
     }
     elem->dir_name = dir;
+    elem->signal_nr = -1;
     
     /* Create four device files in a topic */
     for(i = 0; i < NUM_SPECIAL_FILES; i++){
@@ -309,7 +312,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
             pr_alert("Class_create error: cannot create class for /dev/%s\n", path);
         }
 
-        if(i==0 || i==2){//subscribe + nr_signal files
+        if(i==0 || i==2){//subscribe + signal_nr files
             cls->devnode = cls_set_writeOnly_permission;
         }else if(i==1){ //subscribers_list files
             cls->devnode = cls_set_readOnly_permission;
@@ -322,7 +325,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     }
 
     /* initialize list of pids */
-    INIT_LIST_HEAD(&(elem->pidListHead));
+    INIT_LIST_HEAD(&(elem->pid_list_head));
     list_add(&(elem->list), &topicListHead);
 
     msg[0] = '\0';
@@ -384,10 +387,10 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
         pr_alert("Search_node error: cannot find the node\n");
         return bytes_written;
     }
-    list_add(&(pid_node->list), &(node->pidListHead));
+    list_add(&(pid_node->list), &(node->pid_list_head));
     pr_info("Added pid node to list\n");
 
-    display_pid_list(&(node->pidListHead));
+    display_pid_list(&(node->pid_list_head));
 
     msg[0] = '\0';
     
@@ -434,7 +437,7 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
     dentry = filp->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
 
-    list_for_each_entry(ptr, &(node->pidListHead), list){
+    list_for_each_entry(ptr, &(node->pid_list_head), list){
         int len, i = 0;
         char *str;
         str = (char*)kmalloc(MAX_SIZE_PID, GFP_KERNEL);
@@ -506,9 +509,9 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
     signal_nr = signal_atoi(msg);
     if(signal_nr==EINVAL)
         return EINVAL;
-    node->nr_signal = signal_nr;
+    node->signal_nr = signal_nr;
 
-    pr_info("Signal written: %d\n", node->nr_signal);
+    pr_info("Signal written: %d\n", node->signal_nr);
     msg[0]='\0';
 
     return written_bytes;
@@ -519,19 +522,73 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
 /*
 * Called whenever a process attempts to open the endpoint device file.
 */
-static int endpoint_open(struct inode *inode, struct file *file){return -1;}
+static int endpoint_open(struct inode *inode, struct file *file){
+    try_module_get(THIS_MODULE);
+    return SUCCESS;
+}
 
 /* 
 * Called when a process closes the endpoint device file.
 */
-static int endpoint_release(struct inode *inode, struct file *file){return -1;}
+static int endpoint_release(struct inode *inode, struct file *file){
+    module_put(THIS_MODULE);
+    return SUCCESS;
+}
 
 /* 
 * Called when a process writes to the endpoint device file
 * echo "test" > /dev/psipc/endpoint
 */
 
-static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){return 0;}
+static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
+    int i, written_bytes;
+    struct topic_node *node;
+    char* dentry;
+    struct pid_node *ptr;
+    struct kernel_siginfo info;
+    struct pid* pid;
+
+    for (i = 0; i < len && i < BUF_LEN; i++) 
+        get_user(msg[i], buff + i);
+
+    written_bytes = i;
+    pr_info("Written: %s\n", msg);
+    msg[i-1] = '\0';
+
+    dentry = filp->f_path.dentry->d_parent->d_iname;
+    pr_info("Dentry to search: %s\n", dentry);
+    node = search_node(dentry);
+    if(node==NULL){
+        pr_alert("Node not found\n");
+        return EFAULT;
+    }
+
+    if((node->signal_nr)==-1){
+        pr_info("Publisher hasn't specified the signal to send to subrisbers. No signal will be sent.\n");
+        return written_bytes;
+    }
+    
+    if(list_empty(&(node->pid_list_head))){
+        pr_info("No subscribers to notify. Message is discarded.\n");
+        return written_bytes;
+    }
+
+    //memset(&info, 0, sizeof(struct siginfo));
+    info.si_signo = node->signal_nr;
+    //info.si_code = SI_QUEUE;
+    info.si_int = 1;
+
+    list_for_each_entry(ptr, &(node->pid_list_head), list){
+        pid = find_vpid(ptr->pid);
+        //send_sig_info()
+        if(kill_pid(pid, node->signal_nr, &info) < 0) {
+            //use kill_proc_info() instead
+            pr_alert("Unable to send signal\n");
+        }
+    }
+
+    return written_bytes;
+}
 
 /*
 * It releases all the device files for every topic.
@@ -552,8 +609,8 @@ static void release_files(void){
         list_for_each_safe(ptr1, temp1, &topicListHead){
             entry_temp = list_entry(ptr1, struct topic_node, list);
             if(entry_temp!=NULL){
-                if(!list_empty(&(entry_temp->pidListHead))){
-                    list_for_each_safe(ptr2, temp2, &(entry_temp->pidListHead)){
+                if(!list_empty(&(entry_temp->pid_list_head))){
+                    list_for_each_safe(ptr2, temp2, &(entry_temp->pid_list_head)){
                         list_del(ptr2);
                     }
                 }else{
