@@ -36,6 +36,7 @@ static ssize_t signal_nr_write(struct file*, const char __user *, size_t, loff_t
 static int endpoint_open(struct inode*, struct file*);
 static int endpoint_release(struct inode*, struct file*);
 static ssize_t endpoint_write(struct file*, const char __user *, size_t, loff_t*);
+static ssize_t endpoint_read(struct file*, char __user *, size_t, loff_t*);
 
 //other functions
 static void release_files(void); 
@@ -82,6 +83,7 @@ static struct file_operations signal_nr_fops = {
 
 static struct file_operations endpoint_fops = {
     .owner = THIS_MODULE,
+    .read = endpoint_read,
 	.write = endpoint_write,
 	.open = endpoint_open,
 	.release = endpoint_release,
@@ -564,6 +566,45 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     }
 
     return written_bytes;
+}
+
+/*
+* Called when a process, which already opened the endpoint device file, attempts to read from it.
+* It prints the message written to endpoint
+* cat /dev/psipc/endpoint
+*/
+static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
+    int bytes_read = 0, i = 0, len; 
+    struct topic_node *node;
+    char *dentry;
+
+    if (flag) { //we are at the end of message 
+        pr_info("Exit.\n");
+        flag = 0; //reset the flag
+        *offset = 0; //reset the offset 
+        return 0; // signify end of file
+    } 
+
+    dentry = filp->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    const char *msg_ptr = node->endpoint_msg; 
+    len = strlen(msg_ptr);
+
+    /* Actually put the data into the buffer */ 
+    while (len > 0) { 
+        put_user(msg_ptr[i++], buffer++);
+        len--; 
+        bytes_read++;
+    } 
+
+    put_user('\n', buffer++);
+    bytes_read++;
+
+    *offset += bytes_read; 
+    flag = 1;
+    
+    return bytes_read;
 }
 
 /*
