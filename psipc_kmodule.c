@@ -42,6 +42,7 @@ static ssize_t endpoint_read(struct file*, char __user *, size_t, loff_t*);
 static void release_files(void); 
 static void display_list(void);
 static void display_pid_list(struct list_head*);
+static struct pid_node* search_pid_node(struct list_head*);
 static struct topic_node* search_node(char*);  
 static int pid_atoi(char*);
 static int signal_atoi(char*);
@@ -94,13 +95,20 @@ static struct topic_node{
 	struct class file_dev_cls[NUM_SPECIAL_FILES]; /* array of struct class, one for every device files */
     dev_t devices[NUM_SPECIAL_FILES]; /* array of dev_t, one for every device files, used to store device numbers*/
     struct list_head pid_list_head; /* head of list of struct pid_node */
+    struct list_head message_list_head; /* head of list of struct msg_node */
     int signal_nr; /* type of signal to send to all the topic subscribers */
     struct list_head list;
-    char *endpoint_msg;
+    int num_of_messages;
 };
 
 static struct pid_node{
     int pid;
+    int n_read;
+    struct list_head list;
+};
+
+static struct msg_node{
+    char *message;
     struct list_head list;
 };
 
@@ -264,6 +272,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     }
     elem->dir_name = dir;
     elem->signal_nr = -1;
+    elem->num_of_messages = 0;
     
     /* Create four device files in a topic */
     for(i = 0; i < NUM_SPECIAL_FILES; i++){
@@ -295,6 +304,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 
     /* initialize list of pids */
     INIT_LIST_HEAD(&(elem->pid_list_head));
+    INIT_LIST_HEAD(&(elem->message_list_head));
     list_add(&(elem->list), &topicListHead);
 
     msg[0] = '\0';
@@ -345,6 +355,7 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
         return -ENOMEM;
     }
     pid_node->pid = pid_atoi(msg);
+    pid_node->n_read = 0;
     if(pid_node->pid <0){
         pr_alert("ERROR: %s is not a pid\n", msg);
         return bytes_written;
@@ -512,8 +523,9 @@ static int endpoint_release(struct inode *inode, struct file *file){
 static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
     int i, written_bytes;
     struct topic_node *node;
-    char* dentry;
     struct pid_node *ptr;
+    char* dentry;
+    struct msg_node *msgNode;x\
     struct kernel_siginfo info;
     struct pid* pid;
 
@@ -531,15 +543,21 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         pr_alert("Node not found\n");
         return EFAULT;
     }
-    /*DISCARDING THE OLD MESSAGE: what if not all of the subscribers read it?*/
-    if(node->endpoint_msg!=NULL){
-        kfree(node->endpoint_msg);
+
+    msgNode = (struct msg_node*)kmalloc(sizeof(struct msg_node), GFP_KERNEL);
+    if(msgNode==NULL){
+        pr_alert("Kmalloc error: cannot allocate memory for the msgNode\n");
+        return -ENOMEM;
     }
-    node->endpoint_msg = (char*)kmalloc(sizeof(written_bytes+1), GFP_KERNEL);
-    if(node->endpoint_msg==NULL){
-        pr_alert("ERROR:memory not allocated for node->endpoint_msg\n");
+
+    msgNode->message = (char*)kmalloc(written_bytes + 1, GFP_KERNEL);
+    if(msgNode->message==NULL){
+        pr_alert("ERROR:memory not allocated for msgNode->message\n");
     }
-    strcpy(node->endpoint_msg, msg);
+
+    strcpy(msgNode->message, msg);
+    list_add(&(msgNode->list), &(node->message_list_head));
+    node->num_of_messages++;
 
     if((node->signal_nr)==-1){
         pr_info("Publisher hasn't specified the signal to send to subrisbers. No signal will be sent.\n");
@@ -576,7 +594,10 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
 static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
     int bytes_read = 0, i = 0, len; 
     struct topic_node *node;
+    struct msg_node *ptr;
+    struct pid_node *pidNode;
     char *dentry;
+    int total;
 
     if (flag) { //we are at the end of message 
         pr_info("Exit.\n");
@@ -587,23 +608,35 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
 
     dentry = filp->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
+    pidNode = search_pid_node(&(node->pid_list_head));
+    total = node->num_of_messages;
 
-    const char *msg_ptr = node->endpoint_msg; 
-    len = strlen(msg_ptr);
+    if(total == pidNode->n_read){
+        flag = 1;
+        return 0;
+    }
 
-    /* Actually put the data into the buffer */ 
-    while (len > 0) { 
-        put_user(msg_ptr[i++], buffer++);
-        len--; 
-        bytes_read++;
-    } 
+    list_for_each_entry(ptr, &(node->message_list_head), list){
+        int len, i = 0;
 
-    put_user('\n', buffer++);
-    bytes_read++;
+        if(pidNode->n_read < total){
+            const char *msg_ptr = ptr->message; 
+    
+            len = strlen(msg_ptr);
+
+            /* Actually put the data into the buffer */ 
+            while (len > 0) { 
+                put_user(msg_ptr[i++], buffer++);
+                len--; 
+                bytes_read++;
+            } 
+            pidNode->n_read++;
+        }
+    }
 
     *offset += bytes_read; 
     flag = 1;
-    
+
     return bytes_read;
 }
 
@@ -614,6 +647,7 @@ static void release_files(void){
     int n_topics, n_files;
     struct list_head *ptr1, *ptr2, *temp1, *temp2;
     struct topic_node *entry, *entry_temp;
+    struct msg_node *entry_temp2;
 
     if(!list_empty(&topicListHead)){
         entry = list_first_entry_or_null(&topicListHead, struct topic_node, list);
@@ -635,6 +669,17 @@ static void release_files(void){
                 }
                 pr_info("All pid freed\n");
 
+                if(!list_empty(&(entry_temp->message_list_head))){
+                    list_for_each_safe(ptr2, temp2, &(entry_temp->message_list_head)){
+                        entry_temp2 = list_entry(ptr2, struct msg_node, list);
+                        if(entry_temp2->message!=NULL)
+                            kfree(entry_temp2->message);
+                        list_del(ptr2);
+                    }
+                }else{
+                    pr_alert("No message list to free\n");
+                }
+
                 for(n_files=0; n_files < NUM_SPECIAL_FILES; n_files++){
                     char *str = (char*)kmalloc(strlen(entry_temp->dir_name) + strlen(files[n_files]), GFP_KERNEL);
                     strcpy(str, entry_temp->dir_name);
@@ -645,10 +690,7 @@ static void release_files(void){
                     unregister_chrdev(major, str);
                     kfree(str);
                 }
-                if(entry_temp->endpoint_msg!=NULL){
-                    kfree(entry_temp->endpoint_msg);
-                    pr_info("Endpoint message freed\n");
-                }
+                //DELETE MESSAGE LIST
                 if(ptr1!=NULL){
                     list_del(ptr1);
                 }else
@@ -714,6 +756,20 @@ static struct topic_node* search_node(char *dir){
     list_for_each_entry(ptr, &topicListHead, list){
         if(strcmp(ptr->dir_name, path)==0){
             pr_info("Node found!\n");
+            return ptr;
+        }
+    }
+    return NULL;
+}
+
+/*
+* It searches in the list the correct pid_node
+*/
+static struct pid_node* search_pid_node(struct list_head *head){
+    struct pid_node *ptr;
+
+    list_for_each_entry(ptr, head, list){
+        if(ptr->pid == current->pid){
             return ptr;
         }
     }
