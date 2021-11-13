@@ -10,7 +10,10 @@
 #include <linux/string.h>
 #include <linux/list.h>
 #include <linux/signal.h>
+//#include <linux/syscalls.h>
 #include <linux/types.h>
+#include <linux/unistd.h>
+
 
 //new_topic functions
 static int new_topic_open(struct inode *, struct file *); 
@@ -210,8 +213,6 @@ static void __exit chardev_exit(void)
 */
 static int new_topic_open(struct inode *inode, struct file *file) 
 { 
-    static int counter = 0; 
-    
     /*
     * Read the 32-bit value of new_topic_already_open through its address.
     * Compute (new_topic_already_open == CDEV_NOT_USED) ?  CDEV_EXCLUSIVE_OPEN : old and store result in new_topic_already_open. 
@@ -236,17 +237,29 @@ static int new_topic_release(struct inode *inode, struct file *file)
  
     return SUCCESS; 
 }
- 
+/*extern int do_fchownat(int dfd, const char __user *filename, uid_t user,
+		       gid_t group, int flag);*/
+long ksys_chown_stub(const char __user *filepath, uid_t user, gid_t group){
+    int res = 0;
+    //res = ksys_chown(AT_FDCWD, filepath, user, group, 0);
+    //int res = ksys_chown(filepath, user, group);
+    return res;
+}
 /* 
 * Called when a process writes to the new_topic device file
 * echo "test" > /dev/psipc/new_topic
 */
 static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) 
 { 
-    int i, created_sub, path_len=0, buf_size, bytes_written; 
+    int i, created_sub, path_len=0, bytes_written; 
     char *dir;
     struct topic_node *elem;
     struct class *cls;
+    uid_t new_file_owner;
+    gid_t new_file_group;
+
+    new_file_owner = (current_uid()).val;
+    new_file_group = (current_gid()).val;
  
     for (i = 0; i < len && i < BUF_LEN; i++) 
         get_user(msg[i], buff + i);
@@ -300,6 +313,12 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
         elem->devices[i] = MKDEV(created_sub, 0);
         device_create(cls, NULL, elem->devices[i], NULL, path); 
         elem->file_dev_cls[i] = *cls;
+        //CHANGE OWNERSHIP
+        /*if(ksys_chown_stub(path, new_file_owner, new_file_group)!=0){
+            pr_alert("ERROR: change owner failed.\n");
+            //call function to delete just created files
+            return EINVAL;
+        }*/
     }
 
     /* initialize list of pids */
@@ -312,7 +331,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     display_list();
     
     return bytes_written; 
-} 
+}
 
 /*
 * Called whenever a process attempts to open the subscribe device file.
@@ -523,9 +542,10 @@ static int endpoint_release(struct inode *inode, struct file *file){
 static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
     int i, written_bytes;
     struct topic_node *node;
-    struct pid_node *ptr;
+    struct list_head *ptr, *temp_pid_node;
+    struct pid_node *pid_entry;
     char* dentry;
-    struct msg_node *msgNode;x\
+    struct msg_node *msgNode;
     struct kernel_siginfo info;
     struct pid* pid;
 
@@ -574,12 +594,12 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     //info.si_code = SI_QUEUE;
     info.si_int = 1;
 
-    list_for_each_entry(ptr, &(node->pid_list_head), list){
-        pid = find_vpid(ptr->pid);
-        //send_sig_info()
+    list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
+        pid_entry = list_entry(ptr, struct pid_node, list);
+        pid = find_vpid(pid_entry->pid);
         if(kill_pid(pid, node->signal_nr, &info) < 0) {
-            //use kill_proc_info() instead
-            pr_alert("Unable to send signal\n");
+            list_del(ptr);
+            pr_alert("Unable to send signal\n"); //when processed has been killed, it's not removed from the list
         }
     }
 
@@ -591,6 +611,9 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
 * It prints the message written to endpoint
 * cat /dev/psipc/endpoint
 */
+/*
+* FIX: empty message
+*/
 static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
     int bytes_read = 0, i = 0, len; 
     struct topic_node *node;
@@ -599,12 +622,12 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     char *dentry;
     int total;
 
-    if (flag) { //we are at the end of message 
+    /*if (flag) { //we are at the end of message 
         pr_info("Exit.\n");
         flag = 0; //reset the flag
         *offset = 0; //reset the offset 
         return 0; // signify end of file
-    } 
+    } */
 
     dentry = filp->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
@@ -612,7 +635,9 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     total = node->num_of_messages;
 
     if(total == pidNode->n_read){
-        flag = 1;
+        //flag = 1;
+        pr_info("Nothing new to read.\n");
+        *offset = 0;
         return 0;
     }
 
@@ -631,11 +656,13 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
                 bytes_read++;
             } 
             pidNode->n_read++;
+            put_user('\n', buffer++);
+            bytes_read++;
         }
     }
 
     *offset += bytes_read; 
-    flag = 1;
+    //flag = 1;
 
     return bytes_read;
 }
@@ -799,7 +826,7 @@ static int signal_atoi(char *s){
     char negative_flag = '0'; //0:positive number, 1: negative
 
     for(i=0; s[i]!='\0'; i++){
-        if(s[i]!='-' && (s[i]<'0' || s[i]>'9') || (s[i]=='-' && i!=0)){
+        if((s[i]!='-' && (s[i]<'0' || s[i]>'9')) || (s[i]=='-' && i!=0)){
             pr_alert("%s is not a number\n", s);
             return EINVAL;
         }
