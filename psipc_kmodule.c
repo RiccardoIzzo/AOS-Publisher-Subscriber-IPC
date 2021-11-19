@@ -10,9 +10,10 @@
 #include <linux/string.h>
 #include <linux/list.h>
 #include <linux/signal.h>
-//#include <linux/syscalls.h>
 #include <linux/types.h>
 #include <linux/unistd.h>
+#include <linux/namei.h>
+#include <linux/cred.h>
 
 
 //new_topic functions
@@ -49,10 +50,13 @@ static struct pid_node* search_pid_node(struct list_head*);
 static struct topic_node* search_node(char*);  
 static int pid_atoi(char*);
 static int signal_atoi(char*);
+static int set_files_ownership(const char *msg);
+static int set_topic_ownership(const char *msg);
  
 #define SUCCESS 0 
 #define NEW_TOPIC_PATH "psipc/new_topic" /* Device name as it appears in /proc/devices */ 
 #define TOPICS_PATH "psipc/topics/"
+#define FULL_PATH "/dev/psipc/topics/"
 #define BUF_LEN 100 /* Max length of the message from the device */ 
 #define NUM_SPECIAL_FILES 4 /* Number of device files for every topic */
 #define MAX_SIZE_PID 10 /* On a 64-bit system the the max pid value is 4194304 */
@@ -215,7 +219,7 @@ static int new_topic_open(struct inode *inode, struct file *file)
     */
     if (atomic_cmpxchg(&new_topic_already_open, CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
         return -EBUSY; 
- 
+
     try_module_get(THIS_MODULE); 
  
     return SUCCESS; 
@@ -232,14 +236,7 @@ static int new_topic_release(struct inode *inode, struct file *file)
  
     return SUCCESS; 
 }
-/*extern int do_fchownat(int dfd, const char __user *filename, uid_t user,
-		       gid_t group, int flag);*/
-long ksys_chown_stub(const char __user *filepath, uid_t user, gid_t group){
-    int res = 0;
-    //res = ksys_chown(AT_FDCWD, filepath, user, group, 0);
-    //int res = ksys_chown(filepath, user, group);
-    return res;
-}
+
 /* 
 * Called when a process writes to the new_topic device file
 * echo "test" > /dev/psipc/new_topic
@@ -247,14 +244,9 @@ long ksys_chown_stub(const char __user *filepath, uid_t user, gid_t group){
 static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) 
 { 
     int i, created_sub, path_len=0, bytes_written; 
-    char *dir;
+    char *dir, *path;
     struct topic_node *elem;
     struct class *cls;
-    uid_t new_file_owner;
-    gid_t new_file_group;
-
-    new_file_owner = (current_uid()).val;
-    new_file_group = (current_gid()).val;
  
     for (i = 0; i < len && i < BUF_LEN; i++) 
         get_user(msg[i], buff + i);
@@ -285,7 +277,11 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     
     /* Create four device files in a topic */
     for(i = 0; i < NUM_SPECIAL_FILES; i++){
-        char *path = (char*)kmalloc(path_len + strlen(files[i]), GFP_KERNEL);
+        if(!(path = (char*)kmalloc(path_len + strlen(files[i]), GFP_KERNEL))){
+        pr_alert("Kmalloc error: cannot allocate memory for path\n");
+        return -ENOMEM;
+        }
+
         strcpy(path, dir);
         strcat(path, files[i]);
 
@@ -309,13 +305,10 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
         elem->devices[i] = MKDEV(created_sub, 0);
         device_create(cls, NULL, elem->devices[i], NULL, path); 
         elem->file_dev_cls[i] = *cls;
-        //CHANGE OWNERSHIP
-        /*if(ksys_chown_stub(path, new_file_owner, new_file_group)!=0){
-            pr_alert("ERROR: change owner failed.\n");
-            //call function to delete just created files
-            return EINVAL;
-        }*/
     }
+
+    set_files_ownership(msg);
+    set_topic_ownership(msg);
 
     /* initialize list of pids */
     INIT_LIST_HEAD(&(elem->pid_list_head));
@@ -326,6 +319,60 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     display_list();
     
     return bytes_written; 
+}
+
+static int set_files_ownership(const char *msg){
+    int i;
+    char *full_path, *temp;
+    struct path path_struct;
+    struct inode *inode;
+    kuid_t uid = current_uid();
+    kgid_t gid = current_gid();
+
+    if(!(temp = (char*)kmalloc(strlen(FULL_PATH) + strlen(msg), GFP_KERNEL))){
+            pr_alert("Kmalloc error: cannot allocate memory for temp\n");
+            return -ENOMEM;
+    }
+    strcpy(temp, FULL_PATH);
+    strcat(temp, msg);
+
+    for(i = 0; i < NUM_SPECIAL_FILES; i++){
+        if(!(full_path = (char*)kmalloc(strlen(temp) + strlen(files[i]), GFP_KERNEL))){
+            pr_alert("Kmalloc error: cannot allocate memory for full_path\n");
+            return -ENOMEM;
+        }
+        strcpy(full_path, temp);
+        strcat(full_path, files[i]);
+        kern_path(full_path, LOOKUP_FOLLOW, &path_struct);
+        inode = path_struct.dentry->d_inode;
+        inode->i_uid = uid;
+        inode->i_gid = gid;
+        kfree(full_path);
+    }
+    kfree(temp);
+    return 0;
+}
+
+static int set_topic_ownership(const char *msg){
+    int i;
+    char *full_path;
+    struct path path_struct;
+    struct inode *inode;
+    kuid_t uid = current_uid();
+    kgid_t gid = current_gid();
+
+    if(!(full_path = (char*)kmalloc(strlen(FULL_PATH) + strlen(msg), GFP_KERNEL))){
+            pr_alert("Kmalloc error: cannot allocate memory for full_path\n");
+            return -ENOMEM;
+    }
+    strcpy(full_path, FULL_PATH);
+    strcat(full_path, msg);
+    kern_path(full_path, LOOKUP_FOLLOW, &path_struct);
+    inode = path_struct.dentry->d_inode;
+    inode->i_uid = uid;
+    inode->i_gid = gid;
+    kfree(full_path);
+    return 0;
 }
 
 /*
