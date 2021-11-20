@@ -15,6 +15,8 @@
 #include <linux/namei.h>
 #include <linux/cred.h>
 
+#include <linux/spinlock.h>
+
 
 //new_topic functions
 static int new_topic_open(struct inode *, struct file *); 
@@ -57,73 +59,85 @@ static int set_topic_ownership(const char *msg);
 #define NEW_TOPIC_PATH "psipc/new_topic" /* Device name as it appears in /proc/devices */ 
 #define TOPICS_PATH "psipc/topics/"
 #define FULL_PATH "/dev/psipc/topics/"
-#define BUF_LEN 100 /* Max length of the message from the device */ 
-#define NUM_SPECIAL_FILES 4 /* Number of device files for every topic */
-#define MAX_SIZE_PID 10 /* On a 64-bit system the the max pid value is 4194304 */
+#define BUF_LEN 100                     /* Max length of the message from the device */ 
+#define NUM_SPECIAL_FILES 4             /* Number of device files for every topic */
+#define MAX_SIZE_PID 10                 /* On a 64-bit system the the max pid value is 4194304 */
  
 static struct file_operations new_topic_dev_fops = { 
-	.owner = THIS_MODULE,
-    .write = new_topic_write, 
-    .open = new_topic_open, 
-    .release = new_topic_release, 
+	.owner      = THIS_MODULE,
+    .write      = new_topic_write, 
+    .open       = new_topic_open, 
+    .release    = new_topic_release, 
 };
 
 static struct file_operations subscribe_fops = {
-    .owner = THIS_MODULE,
-    .write = subscribe_write,
-    .open = subscribe_open,
-    .release = subscribe_release,
+    .owner      = THIS_MODULE,
+    .write      = subscribe_write,
+    .open       = subscribe_open,
+    .release    = subscribe_release,
 };
 
 static struct file_operations subscribers_list_fops = {
-    .owner = THIS_MODULE,
-    .read = subs_list_read,
-    .open = subs_list_open,
-    .release = subs_list_release,
+    .owner      = THIS_MODULE,
+    .read       = subs_list_read,
+    .open       = subs_list_open,
+    .release    = subs_list_release,
 }; 
 
 static struct file_operations signal_nr_fops = {
-    .owner = THIS_MODULE,
-	.write = signal_nr_write,
-	.open = signal_nr_open,
-	.release = signal_nr_release,
+    .owner      = THIS_MODULE,
+	.write      = signal_nr_write,
+	.open       = signal_nr_open,
+	.release    = signal_nr_release,
 };
 
 static struct file_operations endpoint_fops = {
-    .owner = THIS_MODULE,
-    .read = endpoint_read,
-	.write = endpoint_write,
-	.open = endpoint_open,
-	.release = endpoint_release,
+    .owner      = THIS_MODULE,
+    .read       = endpoint_read,
+	.write      = endpoint_write,
+	.open       = endpoint_open,
+	.release    = endpoint_release,
 };
 
+/* Multi-processes safety*/
+enum { 
+    CDEV_NOT_USED = 0, 
+    CDEV_EXCLUSIVE_OPEN = 1, 
+};
+ 
+static atomic_t new_topic_already_open = ATOMIC_INIT(CDEV_NOT_USED); /*to not have more publisher request for a new topic concurrently*/
+static DEFINE_RWLOCK(topic_list_rwlock);                            /*to sync operations on topicListHead list*/
+
+/* Topic_node struct represent a topic directory in /dev/psipc/topics*/
 static struct topic_node{
-    char *dir_name; /* path name of the topic */
-	struct class file_dev_cls[NUM_SPECIAL_FILES]; /* array of struct class, one for every device files */
-    dev_t devices[NUM_SPECIAL_FILES]; /* array of dev_t, one for every device files, used to store device numbers*/
-    struct list_head pid_list_head; /* head of list of struct pid_node */
-    int signal_nr; /* type of signal to send to all the topic subscribers */
+    char *dir_name;                                 /* path name of the topic */
+	struct class file_dev_cls[NUM_SPECIAL_FILES];   /* array of struct class, one for every device files */
+    dev_t devices[NUM_SPECIAL_FILES];               /* array of dev_t, one for every device files, used to store device numbers*/
+    struct list_head pid_list_head;                 /* head of list of struct pid_node */
+    int signal_nr;                                  /* type of signal to send to all the topic subscribers */
     struct list_head list;
-    int n_read; /* number of read operations executed on endpoint by the subscribers */
-    int n_subscriber; /* total number of subscribers */
-    char *message; /* message written to endpoint */
+    int n_read;                                     /* number of read operations executed on endpoint by the subscribers */
+    int n_subscriber;                               /* total number of subscribers */
+    char *message;                                  /* message written to endpoint */
+
+    /*Concurrency*/
+    rwlock_t subscribe_rwlock;          /* Read-write lock for interaction between read op on subscribers_list file 
+                                        * and write op on subscribe file. */
+    atomic_t signal_nr_atom;            /* At most one publisher is allowed to write on the signal_nr device file.
+                                        * Endpoint cannot be written if the publisher is writing the signal on signal_nr
+                                        *file and viceversa. */
+    //atomic_t subscribe_write_atom = ATOMIC_INIT(CDEV_NOT_USED)
+rwlock_t endpoint_rwlock;                               /* Read-write lock for interaction between read op on endpoint file and 
+                                                            * write op on endpoint file. */
 };
 
+/* Pid_node struct is a node in the list of subscribers' pids to a specific topic_node: topic_node.pid_list_head*/
 static struct pid_node{
     int pid;
     struct list_head list;
 };
 
 static struct list_head topicListHead; /* head of list of struct topic_node */
-
-enum { 
-    CDEV_NOT_USED = 0, 
-    CDEV_EXCLUSIVE_OPEN = 1, 
-}; 
- 
-/* Is device open? Used to prevent multiple access to device */ 
-static atomic_t new_topic_already_open = ATOMIC_INIT(CDEV_NOT_USED); 
-static atomic_t subscribers_list_already_open = ATOMIC_INIT(CDEV_NOT_USED);
 
 static int major;
 static int flag = 0; 
@@ -136,11 +150,18 @@ const char* files[] = {"/subscribe", "/subscribers_list", "/signal_nr", "/endpoi
 const struct file_operations* fops[] = {&subscribe_fops, &subscribers_list_fops, &signal_nr_fops, &endpoint_fops};
 
 /*
-* It sets read and write permission to the device file
+* It sets read and write permission to the device file. This function has to be assigned to a class->devnode field.
 */
 static char *cls_set_readAndWrite_permission(struct device *dev, umode_t *mode){
     if(mode!=NULL){
-        *mode = (umode_t)0666;
+        *mode = (umode_t)0660;
+    }
+    return NULL;
+}
+
+static char *cls_set_writeOnly_permission_global(struct device *dev, umode_t *mode){
+    if(mode!=NULL){
+        *mode = (umode_t)0222;
     }
     return NULL;
 }
@@ -150,7 +171,7 @@ static char *cls_set_readAndWrite_permission(struct device *dev, umode_t *mode){
 */
 static char *cls_set_writeOnly_permission(struct device *dev, umode_t *mode){
     if(mode!=NULL){
-        *mode = (umode_t)0622;
+        *mode = (umode_t)0220;
     }
     return NULL;
 }
@@ -160,14 +181,14 @@ static char *cls_set_writeOnly_permission(struct device *dev, umode_t *mode){
 */
 static char *cls_set_readOnly_permission(struct device *dev, umode_t *mode){
     if(mode!=NULL){
-        *mode = (umode_t)0644;
+        *mode = (umode_t)0440;
     }
     return NULL;
 }
 
 /*
 * Called when the module is loaded with insmod.
-* It creates the /psipc directory and the new_topic character device.
+* It creates the /dev/psipc directory and the new_topic character device in it.
 */
 static int __init chardev_init(void)
 { 
@@ -186,7 +207,7 @@ static int __init chardev_init(void)
     if(IS_ERR(new_topic_cls)){
 
     }
-    new_topic_cls->devnode = cls_set_writeOnly_permission; 
+    new_topic_cls->devnode = cls_set_writeOnly_permission_global; 
     device_create(new_topic_cls, NULL, MKDEV(major, 0), NULL, NEW_TOPIC_PATH); 
  
     pr_info("Device created on /dev/%s\n", NEW_TOPIC_PATH); 
@@ -196,7 +217,7 @@ static int __init chardev_init(void)
  
 /*
 * Called when the module is unloaded with rmmmod.
-* It deletes all the device files for every topic and finally delete the /psipc directory.
+* It deletes all the device files for every topic and finally delete the /dev/psipc directory.
 */
 static void __exit chardev_exit(void) 
 { 
@@ -274,6 +295,9 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     elem->signal_nr = -1;
     elem->n_read = 0;
     elem->n_subscriber = 0;
+    atomic_set(&(elem->signal_nr_atom), CDEV_NOT_USED);
+    rwlock_init(&(elem->subscribe_rwlock));
+    rwlock_init(&(elem->endpoint_rwlock));
     
     /* Create four device files in a topic */
     for(i = 0; i < NUM_SPECIAL_FILES; i++){
@@ -312,7 +336,11 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 
     /* initialize list of pids */
     INIT_LIST_HEAD(&(elem->pid_list_head));
+
+    write_lock(&topic_list_rwlock);
     list_add(&(elem->list), &topicListHead);
+    write_unlock(&topic_list_rwlock);
+ 
 
     msg[0] = '\0';
 
@@ -379,7 +407,14 @@ static int set_topic_ownership(const char *msg){
 * Called whenever a process attempts to open the subscribe device file.
 */
 static int subscribe_open(struct inode *inode, struct file *file){
-    //spin_lock(&(file->spinlock)); //best not using spinlocks, semaphore are better coz it's okay if the execution is preempted
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    write_lock(&(node->subscribe_rwlock));
+
     try_module_get(THIS_MODULE);
 
     return SUCCESS;
@@ -389,8 +424,14 @@ static int subscribe_open(struct inode *inode, struct file *file){
 * Called when a process closes the subscribe device file.
 */
 static int subscribe_release(struct inode *inode, struct file *file){
-    //spin_unlock(&(file->spinlock));//not use spinlocks, use semaphore
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+    write_unlock(&(node->subscribe_rwlock));
     module_put(THIS_MODULE);
+
     return SUCCESS;
 }  
 
@@ -444,8 +485,14 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
 * Called whenever a process attempts to open the subscribers_list device file.
 */
 static int subs_list_open(struct inode *inode, struct file *file){
-    if (atomic_cmpxchg(&subscribers_list_already_open, CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
-        return -EBUSY; 
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    read_lock(&(node->subscribe_rwlock));
+
     try_module_get(THIS_MODULE);
     return SUCCESS;
 }
@@ -454,7 +501,14 @@ static int subs_list_open(struct inode *inode, struct file *file){
 * Called when a process closes the subscribers_list device file.
 */
 static int subs_list_release(struct inode *inode, struct file *file){
-    atomic_set(&subscribers_list_already_open, CDEV_NOT_USED);
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    read_unlock(&(node->subscribe_rwlock));
+
     module_put(THIS_MODULE);
     return SUCCESS;
 }
@@ -512,6 +566,15 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
 * Called whenever a process attempts to open the signal_nr device file.
 */
 static int signal_nr_open(struct inode *inode, struct file *file){
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    if (atomic_cmpxchg(&(node->signal_nr_atom), CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
+        return -EBUSY;
+
     try_module_get(THIS_MODULE);
     return SUCCESS;
 }
@@ -520,6 +583,14 @@ static int signal_nr_open(struct inode *inode, struct file *file){
 * Called when a process closes the signal_nr device file.
 */
 static int signal_nr_release(struct inode *inode, struct file *file){
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+    
+    atomic_set(&(node->signal_nr_atom), CDEV_NOT_USED);
+
     module_put(THIS_MODULE);
     return SUCCESS;
 }
@@ -565,7 +636,22 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
 /*
 * Called whenever a process attempts to open the endpoint device file.
 */
-static int endpoint_open(struct inode *inode, struct file *file){
+static int endpoint_open(struct inode *inode, struct file *file){ 
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    if (atomic_cmpxchg(&(node->signal_nr_atom), CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
+        return -EBUSY;
+    /*write_lock(&(node->endpoint_rwlock));
+    if(node->message!=NULL && node->n_read < node->n_subscriber){
+        //not all the subscribers have finished to read the previous message, so do not write again yet
+        write_unlock(&(node->endpoint_rwlock));
+        return -EBUSY;
+    }*/
+
     try_module_get(THIS_MODULE);
     return SUCCESS;
 }
@@ -574,6 +660,15 @@ static int endpoint_open(struct inode *inode, struct file *file){
 * Called when a process closes the endpoint device file.
 */
 static int endpoint_release(struct inode *inode, struct file *file){
+    char *dentry;
+    struct topic_node *node;
+
+    dentry = file->f_path.dentry->d_parent->d_iname;
+    node = search_node(dentry);
+
+    atomic_set(&(node->signal_nr_atom), CDEV_NOT_USED);
+    /*write_unlock(&(node->endpoint_rwlock));*/
+
     module_put(THIS_MODULE);
     return SUCCESS;
 }
@@ -591,13 +686,6 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     struct kernel_siginfo info;
     struct pid* pid;
 
-    for (i = 0; i < len && i < BUF_LEN; i++) 
-        get_user(msg[i], buff + i);
-
-    written_bytes = i;
-    msg[i-1] = '\0';
-    pr_info("Written: %s\n", msg);
-
     dentry = filp->f_path.dentry->d_parent->d_iname;
     pr_info("Dentry to search: %s\n", dentry);
     node = search_node(dentry);
@@ -605,6 +693,21 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         pr_alert("Node not found\n");
         return EFAULT;
     }
+
+    write_lock(&(node->endpoint_rwlock));
+    if(node->message!=NULL && node->n_read < node->n_subscriber){
+        //not all the subscribers have finished to read the previous message, so do not write again yet
+        write_unlock(&(node->endpoint_rwlock));
+        return -EBUSY;
+    }
+
+    for (i = 0; i < len && i < BUF_LEN; i++) 
+        get_user(msg[i], buff + i);
+
+    written_bytes = i;
+    msg[i-1] = '\0';
+    pr_info("Written: %s\n", msg);
+
 
     if(node->message != NULL){
         kfree(node->message);
@@ -617,30 +720,36 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     strcpy(node->message, msg);
 
     if((node->signal_nr)==-1){
+        write_unlock(&(node->endpoint_rwlock));
         pr_info("Publisher hasn't specified the signal to send to subrisbers. No signal will be sent.\n");
         return written_bytes;
     }
     
     if(list_empty(&(node->pid_list_head))){
+        write_unlock(&(node->endpoint_rwlock));
         pr_info("No subscribers to notify. Message is discarded.\n");
         return written_bytes;
     }
 
     node->n_read = 0;
 
-    //memset(&info, 0, sizeof(struct siginfo));
     info.si_signo = node->signal_nr;
     //info.si_code = SI_QUEUE;
     info.si_int = 1;
 
+    write_lock(&topic_list_rwlock);
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
         pid_entry = list_entry(ptr, struct pid_node, list);
         pid = find_vpid(pid_entry->pid);
         if(kill_pid(pid, node->signal_nr, &info) < 0) {
             list_del(ptr);
+            node->n_subscriber--;
             pr_alert("Unable to send signal\n"); //when processed has been killed, it's not removed from the list
         }
     }
+    write_unlock(&topic_list_rwlock);
+
+    write_unlock(&(node->endpoint_rwlock));
 
     return written_bytes;
 }
@@ -667,14 +776,16 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     node = search_node(dentry);
     if(node==NULL){
         pr_alert("Node not found\n");
-        return EFAULT;
+        return -EFAULT;
     }
+
     pidNode = search_pid_node(&(node->pid_list_head));
     if(pidNode==NULL){
         pr_alert("Pid_node not found\n");
         return EFAULT;
     }
 
+    read_lock(&(node->endpoint_rwlock));
     const char *msg_ptr = node->message; 
     len = strlen(msg_ptr);
 
@@ -694,7 +805,9 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     node->n_read++;
 
     *offset += bytes_read; 
-    flag = 1;   
+    flag = 1; 
+
+    read_unlock(&(node->endpoint_rwlock));  
 
     return bytes_read;
 }
@@ -708,11 +821,13 @@ static void release_files(void){
     struct topic_node *entry, *entry_temp;
     struct msg_node *entry_temp2;
 
+    write_lock(&topic_list_rwlock);
     if(!list_empty(&topicListHead)){
         entry = list_first_entry_or_null(&topicListHead, struct topic_node, list);
 
         if(entry == NULL){
             pr_alert("No topic to delete!\n");
+            write_unlock(&topic_list_rwlock);
             return;
         }
 
@@ -751,6 +866,8 @@ static void release_files(void){
             }else
                 pr_alert("ALERT:null entry\n");
         }
+
+        write_unlock(&topic_list_rwlock);
     }
 }
 
@@ -762,9 +879,11 @@ static void display_list(void){
     struct list_head *ptr;
     struct topic_node *entry, *entry_ptr;
 
+    read_lock(&topic_list_rwlock);
     entry = list_first_entry_or_null(&topicListHead, struct topic_node, list);
     if(entry==NULL){
         pr_alert("ERROR: list is empty\n");
+        read_unlock(&topic_list_rwlock);
         return;
     }else{
     pr_info("-------BEGIN_TOPIC_LIST--------\n");
@@ -773,6 +892,7 @@ static void display_list(void){
     }
     pr_info("------------END_TOPIC_LIST-------\n\n");
     }
+    read_unlock(&topic_list_rwlock);
 }
 
 /*
@@ -806,12 +926,16 @@ static struct topic_node* search_node(char *dir){
     strcpy(path, TOPICS_PATH);
     strcat(path, dir);
 
+    read_lock(&topic_list_rwlock);
     list_for_each_entry(ptr, &topicListHead, list){
         if(strcmp(ptr->dir_name, path)==0){
             pr_info("Node found!\n");
+            read_unlock(&topic_list_rwlock);
             return ptr;
         }
     }
+    read_unlock(&topic_list_rwlock);
+
     return NULL;
 }
 
