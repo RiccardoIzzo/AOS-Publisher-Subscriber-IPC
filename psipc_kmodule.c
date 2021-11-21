@@ -11,40 +11,38 @@
 #include <linux/list.h>
 #include <linux/signal.h>
 #include <linux/types.h>
-#include <linux/unistd.h>
 #include <linux/namei.h>
 #include <linux/cred.h>
-
 #include <linux/spinlock.h>
 
 
-//new_topic functions
+/* new_topic functions */
 static int new_topic_open(struct inode *, struct file *); 
 static int new_topic_release(struct inode *, struct file *); 
 static ssize_t new_topic_write(struct file *, const char __user *, size_t, loff_t *); 
 
-//subscribe functions
+/* subscribe functions */
 static int subscribe_open(struct inode*, struct file*);
 static int subscribe_release(struct inode*, struct file*); 
 static ssize_t subscribe_write(struct file*, const char __user *, size_t, loff_t*);
 
-//subscribers_list functions
+/* subscribers_list functions */
 static int subs_list_open(struct inode*, struct file*);
 static int subs_list_release(struct inode*, struct file*);
 static ssize_t subs_list_read(struct file*, char __user *, size_t, loff_t*);
 
-//signal_nr functions
+/* signal_nr functions */
 static int signal_nr_open(struct inode*, struct file*);
 static int signal_nr_release(struct inode*, struct file*);
 static ssize_t signal_nr_write(struct file*, const char __user *, size_t, loff_t*);
 
-//endpoint functions
+/* endpoint functions */
 static int endpoint_open(struct inode*, struct file*);
 static int endpoint_release(struct inode*, struct file*);
 static ssize_t endpoint_write(struct file*, const char __user *, size_t, loff_t*);
 static ssize_t endpoint_read(struct file*, char __user *, size_t, loff_t*);
 
-//other functions
+/* other functions */
 static void release_files(void); 
 static void display_list(void);
 static void display_pid_list(struct list_head*);
@@ -56,12 +54,12 @@ static int set_files_ownership(const char *msg);
 static int set_topic_ownership(const char *msg);
  
 #define SUCCESS 0 
-#define NEW_TOPIC_PATH "psipc/new_topic" /* Device name as it appears in /proc/devices */ 
-#define TOPICS_PATH "psipc/topics/"
-#define FULL_PATH "/dev/psipc/topics/"
-#define BUF_LEN 100                     /* Max length of the message from the device */ 
-#define NUM_SPECIAL_FILES 4             /* Number of device files for every topic */
-#define MAX_SIZE_PID 10                 /* On a 64-bit system the the max pid value is 4194304 */
+#define NEW_TOPIC_PATH "psipc/new_topic" /* new_topic device file path */ 
+#define TOPICS_PATH "psipc/topics/"      /* topic folder path */
+#define FULL_PATH "/dev/psipc/topics/"   /* topic folder full path */
+#define BUF_LEN 100                      /* max length of the message from the device */ 
+#define NUM_SPECIAL_FILES 4              /* number of device files for every topic */
+#define MAX_SIZE_PID 10                  /* on a 64-bit system the the max pid value is 4194304 */
  
 static struct file_operations new_topic_dev_fops = { 
 	.owner      = THIS_MODULE,
@@ -99,20 +97,20 @@ static struct file_operations endpoint_fops = {
 	.release    = endpoint_release,
 };
 
-/* Multi-processes safety*/
+/* multi-processes safety */
 enum { 
     CDEV_NOT_USED = 0, 
     CDEV_EXCLUSIVE_OPEN = 1, 
 };
  
-static atomic_t new_topic_already_open = ATOMIC_INIT(CDEV_NOT_USED); /*to not have more publisher request for a new topic concurrently*/
-static DEFINE_RWLOCK(topic_list_rwlock);                            /*to sync operations on topicListHead list*/
+static atomic_t new_topic_already_open = ATOMIC_INIT(CDEV_NOT_USED); /* to not have more publisher request for a new topic concurrently */
+static DEFINE_RWLOCK(topic_list_rwlock);                             /* to sync operations on topic_list_head list */
 
-/* Topic_node struct represent a topic directory in /dev/psipc/topics*/
+/* topic_node struct represent a topic directory in /dev/psipc/topics */
 static struct topic_node{
     char *dir_name;                                 /* path name of the topic */
-	struct class file_dev_cls[NUM_SPECIAL_FILES];   /* array of struct class, one for every device files */
-    dev_t devices[NUM_SPECIAL_FILES];               /* array of dev_t, one for every device files, used to store device numbers*/
+	struct class file_dev_cls[NUM_SPECIAL_FILES];   /* array of struct class, one for every device file */
+    dev_t devices[NUM_SPECIAL_FILES];               /* array of dev_t, one for every device file, used to store device numbers */
     struct list_head pid_list_head;                 /* head of list of struct pid_node */
     int signal_nr;                                  /* type of signal to send to all the topic subscribers */
     struct list_head list;
@@ -120,34 +118,33 @@ static struct topic_node{
     int n_subscriber;                               /* total number of subscribers */
     char *message;                                  /* message written to endpoint */
 
-    /*Concurrency*/
-    rwlock_t subscribe_rwlock;          /* Read-write lock for interaction between read op on subscribers_list file 
-                                        * and write op on subscribe file. */
-    atomic_t signal_nr_atom;            /* At most one publisher is allowed to write on the signal_nr device file.
-                                        * Endpoint cannot be written if the publisher is writing the signal on signal_nr
-                                        *file and viceversa. */
+    /* Concurrency */
+    rwlock_t subscribe_rwlock;          /* read-write lock for interaction between read operations on subscribers_list file 
+                                         * and write operations on subscribe file. */
+    atomic_t signal_nr_atom;            /* at most one publisher is allowed to write on the signal_nr device file.
+                                         * Endpoint cannot be written if the publisher is writing the signal on signal_nr
+                                         * file and viceversa. */
     //atomic_t subscribe_write_atom = ATOMIC_INIT(CDEV_NOT_USED)
-rwlock_t endpoint_rwlock;                               /* Read-write lock for interaction between read op on endpoint file and 
-                                                            * write op on endpoint file. */
+    rwlock_t endpoint_rwlock;           /* read-write lock for interaction between read operations and write operations on endpoint file. */
 };
 
-/* Pid_node struct is a node in the list of subscribers' pids to a specific topic_node: topic_node.pid_list_head*/
+/* pid_node struct is a node in the list of subscribers' pids to a specific topic_node: topic_node.pid_list_head*/
 static struct pid_node{
     int pid;
     struct list_head list;
 };
 
-static struct list_head topicListHead; /* head of list of struct topic_node */
+static struct list_head topic_list_head; /* head of list of struct topic_node */
 
-static int major;
-static int flag = 0; 
-static char msg[BUF_LEN]; /* The msg the device will give when asked */ 
+static int major; /* major number of the device file */
+static int flag = 0; /* global flag used in read functions */
+static char msg[BUF_LEN]; /* the msg the device will give when asked */ 
  
 static struct class *new_topic_cls; 
 
-const char* files[] = {"/subscribe", "/subscribers_list", "/signal_nr", "/endpoint"};
+const char* files[] = {"/subscribe", "/subscribers_list", "/signal_nr", "/endpoint"}; /* device files name */
 
-const struct file_operations* fops[] = {&subscribe_fops, &subscribers_list_fops, &signal_nr_fops, &endpoint_fops};
+const struct file_operations* fops[] = {&subscribe_fops, &subscribers_list_fops, &signal_nr_fops, &endpoint_fops}; /* device files file_operations */
 
 /*
 * It sets read and write permission to the device file. This function has to be assigned to a class->devnode field.
@@ -159,6 +156,9 @@ static char *cls_set_readAndWrite_permission(struct device *dev, umode_t *mode){
     return NULL;
 }
 
+/*
+* It sets global write-only permission to the device file. This function has to be assigned to a class->devnode field.
+*/
 static char *cls_set_writeOnly_permission_global(struct device *dev, umode_t *mode){
     if(mode!=NULL){
         *mode = (umode_t)0222;
@@ -167,7 +167,7 @@ static char *cls_set_writeOnly_permission_global(struct device *dev, umode_t *mo
 }
 
 /*
-* It sets write-only permission to the device file
+* It sets write-only permission to the device file. This function has to be assigned to a class->devnode field.
 */
 static char *cls_set_writeOnly_permission(struct device *dev, umode_t *mode){
     if(mode!=NULL){
@@ -177,7 +177,7 @@ static char *cls_set_writeOnly_permission(struct device *dev, umode_t *mode){
 }
 
 /*
-* It sets read-only permission to the device file
+* It sets read-only permission to the device file. This function has to be assigned to a class->devnode field.
 */
 static char *cls_set_readOnly_permission(struct device *dev, umode_t *mode){
     if(mode!=NULL){
@@ -190,18 +190,18 @@ static char *cls_set_readOnly_permission(struct device *dev, umode_t *mode){
 * Called when the module is loaded with insmod.
 * It creates the /dev/psipc directory and the new_topic character device in it.
 */
-static int __init chardev_init(void)
+static int __init psipc_init(void)
 { 
-    // Initialize the list of topics
-    INIT_LIST_HEAD(&topicListHead);
+    /* initialize the list of topics */
+    INIT_LIST_HEAD(&topic_list_head);
     major = register_chrdev(0, NEW_TOPIC_PATH, &new_topic_dev_fops); 
  
     if (major < 0) { 
-        pr_alert("Registering char device failed with %d\n", major); 
+        pr_alert("register_chrdev: ERROR: registering char device failed with %d\n", major); 
         return major; 
     } 
  
-    pr_info("I was assigned major number %d.\n", major); 
+    pr_info("Assigned major number: %d\n", major); 
  
     new_topic_cls = class_create(THIS_MODULE, NEW_TOPIC_PATH);
     if(IS_ERR(new_topic_cls)){
@@ -219,7 +219,7 @@ static int __init chardev_init(void)
 * Called when the module is unloaded with rmmmod.
 * It deletes all the device files for every topic and finally delete the /dev/psipc directory.
 */
-static void __exit chardev_exit(void) 
+static void __exit psipc_exit(void) 
 { 
     release_files();
     device_destroy(new_topic_cls, MKDEV(major, 0)); 
@@ -259,8 +259,7 @@ static int new_topic_release(struct inode *inode, struct file *file)
 }
 
 /* 
-* Called when a process writes to the new_topic device file
-* echo "test" > /dev/psipc/new_topic
+* Called when a process writes to the new_topic device file.
 */
 static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) 
 { 
@@ -279,16 +278,15 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     path_len += strlen(msg);
 
     if(!(dir = (char*)kmalloc(path_len, GFP_KERNEL))){
-        pr_alert("Kmalloc error: cannot allocate memory for %s\n", msg);
+        pr_alert("kmalloc: ERROR: cannot allocate memory for %s\n", msg);
         return -ENOMEM;
     }
 
     strcpy(dir, TOPICS_PATH);
     strcat(dir, msg);
 
-    elem = (struct topic_node*)kmalloc(sizeof(*elem), GFP_KERNEL);
-    if(elem==NULL){
-        pr_alert("Kmalloc error: cannot allocate memory for the topic_node\n");
+    if(!(elem = (struct topic_node*)kmalloc(sizeof(*elem), GFP_KERNEL))){
+        pr_alert("kmalloc: ERROR: cannot allocate memory for the topic_node\n");
         return -ENOMEM;
     }
     elem->dir_name = dir;
@@ -302,7 +300,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     /* Create four device files in a topic */
     for(i = 0; i < NUM_SPECIAL_FILES; i++){
         if(!(path = (char*)kmalloc(path_len + strlen(files[i]), GFP_KERNEL))){
-        pr_alert("Kmalloc error: cannot allocate memory for path\n");
+        pr_alert("kmalloc: ERROR: cannot allocate memory for path\n");
         return -ENOMEM;
         }
 
@@ -311,17 +309,17 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 
         created_sub = register_chrdev(0, path, fops[i]);
         if(created_sub<0){
-            pr_alert("Register_chrdev error: cannot create directory /dev/%s\n", path);
+            pr_alert("register_chrdev: ERROR: cannot create directory /dev/%s\n", path);
         }
 
         cls = class_create(THIS_MODULE, path);
         if(IS_ERR(cls)){
-            pr_alert("Class_create error: cannot create class for /dev/%s\n", path);
+            pr_alert("class_create: ERROR: cannot create class for /dev/%s\n", path);
         }
 
-        if(i==0 || i==2){//subscribe + signal_nr files
+        if(i==0 || i==2){ /* subscribe + signal_nr device files */
             cls->devnode = cls_set_writeOnly_permission;
-        }else if(i==1){ //subscribers_list files
+        }else if(i==1){ /* subscribers_list device files */
             cls->devnode = cls_set_readOnly_permission;
         }else{
             cls->devnode = cls_set_readAndWrite_permission; 
@@ -338,69 +336,14 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     INIT_LIST_HEAD(&(elem->pid_list_head));
 
     write_lock(&topic_list_rwlock);
-    list_add(&(elem->list), &topicListHead);
+    list_add(&(elem->list), &topic_list_head);
     write_unlock(&topic_list_rwlock);
  
-
     msg[0] = '\0';
 
     display_list();
     
     return bytes_written; 
-}
-
-static int set_files_ownership(const char *msg){
-    int i;
-    char *full_path, *temp;
-    struct path path_struct;
-    struct inode *inode;
-    kuid_t uid = current_uid();
-    kgid_t gid = current_gid();
-
-    if(!(temp = (char*)kmalloc(strlen(FULL_PATH) + strlen(msg), GFP_KERNEL))){
-            pr_alert("Kmalloc error: cannot allocate memory for temp\n");
-            return -ENOMEM;
-    }
-    strcpy(temp, FULL_PATH);
-    strcat(temp, msg);
-
-    for(i = 0; i < NUM_SPECIAL_FILES; i++){
-        if(!(full_path = (char*)kmalloc(strlen(temp) + strlen(files[i]), GFP_KERNEL))){
-            pr_alert("Kmalloc error: cannot allocate memory for full_path\n");
-            return -ENOMEM;
-        }
-        strcpy(full_path, temp);
-        strcat(full_path, files[i]);
-        kern_path(full_path, LOOKUP_FOLLOW, &path_struct);
-        inode = path_struct.dentry->d_inode;
-        inode->i_uid = uid;
-        inode->i_gid = gid;
-        kfree(full_path);
-    }
-    kfree(temp);
-    return 0;
-}
-
-static int set_topic_ownership(const char *msg){
-    int i;
-    char *full_path;
-    struct path path_struct;
-    struct inode *inode;
-    kuid_t uid = current_uid();
-    kgid_t gid = current_gid();
-
-    if(!(full_path = (char*)kmalloc(strlen(FULL_PATH) + strlen(msg), GFP_KERNEL))){
-            pr_alert("Kmalloc error: cannot allocate memory for full_path\n");
-            return -ENOMEM;
-    }
-    strcpy(full_path, FULL_PATH);
-    strcat(full_path, msg);
-    kern_path(full_path, LOOKUP_FOLLOW, &path_struct);
-    inode = path_struct.dentry->d_inode;
-    inode->i_uid = uid;
-    inode->i_gid = gid;
-    kfree(full_path);
-    return 0;
 }
 
 /*
@@ -436,8 +379,7 @@ static int subscribe_release(struct inode *inode, struct file *file){
 }  
 
 /* 
-* Called when a process writes to the subscribe device file
-* echo "test" > /dev/psipc/subscribe
+* Called when a process writes to the subscribe device file.
 */
 static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
     int i, bytes_written;
@@ -451,9 +393,8 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
     bytes_written = i;
     msg[i-1] = '\0';
 
-    pid_node = (struct pid_node*)kmalloc(sizeof(struct pid_node), GFP_KERNEL);
-    if(pid_node==NULL){
-        pr_alert("Kmalloc error: cannot allocate memory for the pid_node\n");
+    if(!(pid_node = (struct pid_node*)kmalloc(sizeof(struct pid_node), GFP_KERNEL))){
+        pr_alert("kmalloc: ERROR: cannot allocate memory for the pid_node\n");
         return -ENOMEM;
     }
     pid_node->pid = pid_atoi(msg);
@@ -465,14 +406,14 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
     dentry = filp->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
     if(node==NULL){
-        pr_alert("Search_node error: cannot find the node\n");
+        pr_alert("search_node: ERROR: cannot find the node\n");
         return bytes_written;
     }
     
     node->n_subscriber++;
 
     list_add(&(pid_node->list), &(node->pid_list_head));
-    pr_info("Added pid node to list\n");
+    pr_info("Pid node successfully added to the list\n");
 
     display_pid_list(&(node->pid_list_head));
 
@@ -516,7 +457,6 @@ static int subs_list_release(struct inode *inode, struct file *file){
 /*
 * Called when a process, which already opened the subscribers_list device file, attempts to read from it.
 * It prints the list of pid of subscribed processes.
-* cat /dev/psipc/subscribers_list
 */
 static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
     int bytes_read = 0; 
@@ -524,11 +464,10 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
     struct topic_node *node;
     char *dentry;
 
-    if (flag) { //we are at the end of message 
-        pr_info("Exit.\n");
-        flag = 0; //reset the flag
-        *offset = 0; //reset the offset 
-        return 0; // signify end of file
+    if (flag) { /* we are at the end of message */
+        flag = 0; /* reset the flag */
+        *offset = 0; /* reset the offset */
+        return 0; /* signify end of file */
     } 
 
     dentry = filp->f_path.dentry->d_parent->d_iname;
@@ -536,10 +475,10 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
 
     list_for_each_entry(ptr, &(node->pid_list_head), list){
         int len, i = 0;
-        char *str;
+        char *str, *msg_ptr;
         str = (char*)kmalloc(MAX_SIZE_PID, GFP_KERNEL);
         snprintf(str, MAX_SIZE_PID, "%d", ptr->pid);
-        const char *msg_ptr = str; 
+        msg_ptr = str; 
     
         len = strlen(str);
 
@@ -596,12 +535,11 @@ static int signal_nr_release(struct inode *inode, struct file *file){
 }
 
 /* 
-* Called when a process writes to the signal_nr device file
-* echo "test" > /dev/psipc/signal_nr
+* Called when a process writes to the signal_nr device file.
+* Each time the publisher rewrites on signal_nr file, the signal is overwritten.
 */
-/*Each time publisher rewrites on signal_nr file, the signal is overwritten.*/
 static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
-    int i, written_bytes=0, signal_nr;
+    int i, written_bytes = 0, signal_nr;
     char* dentry;
     struct topic_node *node;
 
@@ -609,14 +547,13 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
         get_user(msg[i], buff + i);
 
     written_bytes = i;
-    pr_info("Written: %s\n", msg);
     msg[i-1] = '\0';
 
     dentry = filp->f_path.dentry->d_parent->d_iname;
     pr_info("Dentry to search: %s\n", dentry);
     node = search_node(dentry);
     if(node==NULL){
-        pr_alert("Node not found\n");
+        pr_alert("ERROR: node not found\n");
         return EFAULT;
     }
 
@@ -625,13 +562,11 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
         return EINVAL;
     node->signal_nr = signal_nr;
 
-    pr_info("Signal written: %d\n", node->signal_nr);
+    pr_info("Written signal: %d\n", node->signal_nr);
     msg[0]='\0';
 
     return written_bytes;
 }
-
-
 
 /*
 * Called whenever a process attempts to open the endpoint device file.
@@ -675,7 +610,6 @@ static int endpoint_release(struct inode *inode, struct file *file){
 
 /* 
 * Called when a process writes to the endpoint device file
-* echo "test" > /dev/psipc/endpoint
 */
 static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
     int i, written_bytes;
@@ -696,7 +630,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
 
     write_lock(&(node->endpoint_rwlock));
     if(node->message!=NULL && node->n_read < node->n_subscriber){
-        //not all the subscribers have finished to read the previous message, so do not write again yet
+        /* not all the subscribers have finished to read the previous message, so do not write again yet */
         write_unlock(&(node->endpoint_rwlock));
         return -EBUSY;
     }
@@ -708,18 +642,17 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     msg[i-1] = '\0';
     pr_info("Written: %s\n", msg);
 
-
+    /* overwrites the previous message */
     if(node->message != NULL){
         kfree(node->message);
     }
 
-    node->message = (char*)kmalloc(sizeof(written_bytes + 1), GFP_KERNEL);
-    if(node->message == NULL){
-        pr_alert("ERROR: memory are not allocated for node->message\n");
+    if(!(node->message = (char*)kmalloc(sizeof(written_bytes + 1), GFP_KERNEL))){
+        pr_alert("kmalloc: ERROR: cannot allocate memory for node->message\n");
     }
     strcpy(node->message, msg);
 
-    if((node->signal_nr)==-1){
+    if((node->signal_nr) == -1){
         write_unlock(&(node->endpoint_rwlock));
         pr_info("Publisher hasn't specified the signal to send to subrisbers. No signal will be sent.\n");
         return written_bytes;
@@ -734,7 +667,6 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     node->n_read = 0;
 
     info.si_signo = node->signal_nr;
-    //info.si_code = SI_QUEUE;
     info.si_int = 1;
 
     write_lock(&topic_list_rwlock);
@@ -744,7 +676,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         if(kill_pid(pid, node->signal_nr, &info) < 0) {
             list_del(ptr);
             node->n_subscriber--;
-            pr_alert("Unable to send signal\n"); //when processed has been killed, it's not removed from the list
+            pr_alert("ERROR: unable to send signal\n"); /* when process has been killed, it's not removed from the list */
         }
     }
     write_unlock(&topic_list_rwlock);
@@ -757,36 +689,34 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
 /*
 * Called when a process, which already opened the endpoint device file, attempts to read from it.
 * It prints the message written to endpoint
-* cat /dev/psipc/endpoint
 */
 static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t length, loff_t *offset){
     int bytes_read = 0, i = 0, len; 
     struct topic_node *node;
     struct pid_node *pidNode;
-    char *dentry;
+    char *dentry, *msg_ptr;
 
-    if(flag) { //we are at the end of message 
-        pr_info("Exit.\n");
-        flag = 0; //reset the flag
-        *offset = 0; //reset the offset 
-        return 0; // signify end of file
+    if(flag) { /* we are at the end of message */
+        flag = 0; /* reset the flag */
+        *offset = 0; /* reset the offset */
+        return 0; /* signify end of file */
     }
 
     dentry = filp->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
     if(node==NULL){
-        pr_alert("Node not found\n");
+        pr_alert("ERROR: node not found\n");
         return -EFAULT;
     }
 
     pidNode = search_pid_node(&(node->pid_list_head));
     if(pidNode==NULL){
-        pr_alert("Pid_node not found\n");
+        pr_alert("ERROR: pid_node not found\n");
         return EFAULT;
     }
 
     read_lock(&(node->endpoint_rwlock));
-    const char *msg_ptr = node->message; 
+    msg_ptr = node->message; 
     len = strlen(msg_ptr);
 
     if((node->n_read == node->n_subscriber) || (len == 0)){
@@ -816,22 +746,21 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
 * It releases all the device files for every topic.
 */
 static void release_files(void){
-    int n_topics, n_files;
+    int n_files;
     struct list_head *ptr1, *ptr2, *temp1, *temp2;
     struct topic_node *entry, *entry_temp;
-    struct msg_node *entry_temp2;
 
     write_lock(&topic_list_rwlock);
-    if(!list_empty(&topicListHead)){
-        entry = list_first_entry_or_null(&topicListHead, struct topic_node, list);
+    if(!list_empty(&topic_list_head)){
+        entry = list_first_entry_or_null(&topic_list_head, struct topic_node, list);
 
         if(entry == NULL){
-            pr_alert("No topic to delete!\n");
+            pr_info("No topic to delete.\n");
             write_unlock(&topic_list_rwlock);
             return;
         }
 
-        list_for_each_safe(ptr1, temp1, &topicListHead){
+        list_for_each_safe(ptr1, temp1, &topic_list_head){
             entry_temp = list_entry(ptr1, struct topic_node, list);
             if(entry_temp!=NULL){
                 if(!list_empty(&(entry_temp->pid_list_head))){
@@ -839,7 +768,7 @@ static void release_files(void){
                         list_del(ptr2);
                     }
                 }else{
-                    pr_alert("No pid list to free\n");
+                    pr_info("No pid list to free\n");
                 }
                 pr_info("All pid freed\n");
 
@@ -849,7 +778,7 @@ static void release_files(void){
                     strcat(str, files[n_files]);
                     device_destroy(&(entry_temp->file_dev_cls[n_files]), entry_temp->devices[n_files]);
                     class_destroy(&(entry_temp->file_dev_cls[n_files]));
-                    pr_info("DESTROY: %s/%s\n", str, files[n_files]);
+                    pr_info("Delete device file: %s/%s\n", str, files[n_files]);
                     unregister_chrdev(major, str);
                     kfree(str);
                 }
@@ -862,9 +791,9 @@ static void release_files(void){
                 if(ptr1!=NULL){
                     list_del(ptr1);
                 }else
-                    pr_alert("ERROR_RELEASE: no pointer to free\n");
+                    pr_alert("ERROR: no pointer to free\n");
             }else
-                pr_alert("ALERT:null entry\n");
+                pr_alert("ERROR: null entry\n");
         }
 
         write_unlock(&topic_list_rwlock);
@@ -875,19 +804,18 @@ static void release_files(void){
 * It displays the list of topics.
 */
 static void display_list(void){
-    int i=0;
-    struct list_head *ptr;
+    int i = 0;
     struct topic_node *entry, *entry_ptr;
 
     read_lock(&topic_list_rwlock);
-    entry = list_first_entry_or_null(&topicListHead, struct topic_node, list);
+    entry = list_first_entry_or_null(&topic_list_head, struct topic_node, list);
     if(entry==NULL){
-        pr_alert("ERROR: list is empty\n");
+        pr_info("Topic list is empty\n");
         read_unlock(&topic_list_rwlock);
         return;
     }else{
     pr_info("-------BEGIN_TOPIC_LIST--------\n");
-    list_for_each_entry(entry_ptr, &topicListHead, list){
+    list_for_each_entry(entry_ptr, &topic_list_head, list){
         pr_info("Topic[%d]\n\tDir: %s\n", i++, entry_ptr->dir_name);
     }
     pr_info("------------END_TOPIC_LIST-------\n\n");
@@ -909,7 +837,6 @@ static void display_pid_list(struct list_head *head){
     pr_info("---------END_PID_LIST------\n\n");
 }
 
-
 /*
 * It searches in the list the correct topic_node given the topic path.
 */
@@ -917,9 +844,8 @@ static struct topic_node* search_node(char *dir){
     char *path;
     struct topic_node *ptr;
 
-    path = (char*)kmalloc(strlen(TOPICS_PATH) + strlen(dir), GFP_KERNEL);
-    if(path==NULL){
-        pr_alert("Kmalloc error: cannot allocate memory for the path\n");
+    if(!(path = (char*)kmalloc(strlen(TOPICS_PATH) + strlen(dir), GFP_KERNEL))){
+        pr_alert("kmalloc: ERROR: cannot allocate memory for the path\n");
         return NULL;
     }
 
@@ -927,9 +853,8 @@ static struct topic_node* search_node(char *dir){
     strcat(path, dir);
 
     read_lock(&topic_list_rwlock);
-    list_for_each_entry(ptr, &topicListHead, list){
+    list_for_each_entry(ptr, &topic_list_head, list){
         if(strcmp(ptr->dir_name, path)==0){
-            pr_info("Node found!\n");
             read_unlock(&topic_list_rwlock);
             return ptr;
         }
@@ -954,30 +879,31 @@ static struct pid_node* search_pid_node(struct list_head *head){
 }
 
 /*
-* Convert string of numbers into an integer pid (non-negative). Return EINVAL if s is not a pid.
+* Convert string of numbers into an integer pid (non-negative). Return EINVAL if the given string is not a pid.
 */
 static int pid_atoi(char *s){
     int n=0, i;
 
     for(i=0; s[i]!='\0'; i++){
         if(s[i]<'0'  || s[i]>'9'){
-            pr_alert("%s is not a number\n", s);
+            pr_alert("ERROR: %s is not a number\n", s);
             return -1;
         }
         n = n*10 + (s[i] - '0');
     }
     return n;
 }
+
 /*
-* Convert string of numbers into an integer. Return EIVAL if s does not represent  an integer.
+* Convert string of numbers into an integer. Return EINVAL if the given string does not represent an integer.
 */
 static int signal_atoi(char *s){
     int n=0, i;
-    char negative_flag = '0'; //0:positive number, 1: negative
+    char negative_flag = '0'; /* 0: positive number, 1: negative number */
 
     for(i=0; s[i]!='\0'; i++){
         if((s[i]!='-' && (s[i]<'0' || s[i]>'9')) || (s[i]=='-' && i!=0)){
-            pr_alert("%s is not a number\n", s);
+            pr_alert("ERROR: %s is not a number\n", s);
             return EINVAL;
         }
         if(s[i]=='-')
@@ -992,8 +918,67 @@ static int signal_atoi(char *s){
     
     return n;
 }
+
+/*
+* It sets the user as the owner of the device files in the topic.
+*/
+static int set_files_ownership(const char *msg){
+    int i;
+    char *full_path, *temp;
+    struct path path_struct;
+    struct inode *inode;
+    kuid_t uid = current_uid();
+    kgid_t gid = current_gid();
+
+    if(!(temp = (char*)kmalloc(strlen(FULL_PATH) + strlen(msg), GFP_KERNEL))){
+            pr_alert("kmalloc: ERROR: cannot allocate memory for temp\n");
+            return -ENOMEM;
+    }
+    strcpy(temp, FULL_PATH);
+    strcat(temp, msg);
+
+    for(i = 0; i < NUM_SPECIAL_FILES; i++){
+        if(!(full_path = (char*)kmalloc(strlen(temp) + strlen(files[i]), GFP_KERNEL))){
+            pr_alert("kmalloc: ERROR: cannot allocate memory for full_path\n");
+            return -ENOMEM;
+        }
+        strcpy(full_path, temp);
+        strcat(full_path, files[i]);
+        kern_path(full_path, LOOKUP_FOLLOW, &path_struct);
+        inode = path_struct.dentry->d_inode;
+        inode->i_uid = uid;
+        inode->i_gid = gid;
+        kfree(full_path);
+    }
+    kfree(temp);
+    return 0;
+}
+
+/*
+* It sets the user as the owner of the topic.
+*/
+static int set_topic_ownership(const char *msg){
+    char *full_path;
+    struct path path_struct;
+    struct inode *inode;
+    kuid_t uid = current_uid();
+    kgid_t gid = current_gid();
+
+    if(!(full_path = (char*)kmalloc(strlen(FULL_PATH) + strlen(msg), GFP_KERNEL))){
+            pr_alert("kmalloc: ERROR: cannot allocate memory for full_path\n");
+            return -ENOMEM;
+    }
+    strcpy(full_path, FULL_PATH);
+    strcat(full_path, msg);
+    kern_path(full_path, LOOKUP_FOLLOW, &path_struct);
+    inode = path_struct.dentry->d_inode;
+    inode->i_uid = uid;
+    inode->i_gid = gid;
+    kfree(full_path);
+    return 0;
+}
  
-module_init(chardev_init); 
-module_exit(chardev_exit); 
+module_init(psipc_init); 
+module_exit(psipc_exit); 
  
 MODULE_LICENSE("GPL");
