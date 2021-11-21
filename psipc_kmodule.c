@@ -115,8 +115,12 @@ static struct topic_node{
     int signal_nr;                                  /* type of signal to send to all the topic subscribers */
     struct list_head list;
     int n_read;                                     /* number of read operations executed on endpoint by the subscribers */
-    int n_subscriber;                               /* total number of subscribers */
+    int n_subscriber;                               /* total number of subscribers that will/are currently reading the message */
+    int n_new_subscriber;                           /* number of subscribers that arrive while a signal has already been sent and other
+                                                    subscribers are potentially reading the message. The new subscribers won't read it.*/
     char *message;                                  /* message written to endpoint */
+    bool is_reading;                        /* true if a signal has been sent. It goes back to false when publisher wants
+                                                    to write again a message. */
 
     /* Concurrency */
     rwlock_t subscribe_rwlock;          /* read-write lock for interaction between read operations on subscribers_list file 
@@ -124,7 +128,6 @@ static struct topic_node{
     atomic_t signal_nr_atom;            /* at most one publisher is allowed to write on the signal_nr device file.
                                          * Endpoint cannot be written if the publisher is writing the signal on signal_nr
                                          * file and viceversa. */
-    //atomic_t subscribe_write_atom = ATOMIC_INIT(CDEV_NOT_USED)
     rwlock_t endpoint_rwlock;           /* read-write lock for interaction between read operations and write operations on endpoint file. */
 };
 
@@ -293,6 +296,8 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     elem->signal_nr = -1;
     elem->n_read = 0;
     elem->n_subscriber = 0;
+    elem->n_new_subscriber = 0;
+    elem->is_reading = false;
     atomic_set(&(elem->signal_nr_atom), CDEV_NOT_USED);
     rwlock_init(&(elem->subscribe_rwlock));
     rwlock_init(&(elem->endpoint_rwlock));
@@ -410,7 +415,11 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
         return bytes_written;
     }
     
-    node->n_subscriber++;
+    if(node->is_reading){
+        node->n_new_subscriber++;
+    }else{
+        node->n_subscriber++;
+    }
 
     list_add(&(pid_node->list), &(node->pid_list_head));
     pr_info("Pid node successfully added to the list\n");
@@ -580,12 +589,6 @@ static int endpoint_open(struct inode *inode, struct file *file){
 
     if (atomic_cmpxchg(&(node->signal_nr_atom), CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
         return -EBUSY;
-    /*write_lock(&(node->endpoint_rwlock));
-    if(node->message!=NULL && node->n_read < node->n_subscriber){
-        //not all the subscribers have finished to read the previous message, so do not write again yet
-        write_unlock(&(node->endpoint_rwlock));
-        return -EBUSY;
-    }*/
 
     try_module_get(THIS_MODULE);
     return SUCCESS;
@@ -602,7 +605,6 @@ static int endpoint_release(struct inode *inode, struct file *file){
     node = search_node(dentry);
 
     atomic_set(&(node->signal_nr_atom), CDEV_NOT_USED);
-    /*write_unlock(&(node->endpoint_rwlock));*/
 
     module_put(THIS_MODULE);
     return SUCCESS;
@@ -634,6 +636,8 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         write_unlock(&(node->endpoint_rwlock));
         return -EBUSY;
     }
+    
+    node->is_reading = false;
 
     for (i = 0; i < len && i < BUF_LEN; i++) 
         get_user(msg[i], buff + i);
@@ -654,7 +658,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
 
     if((node->signal_nr) == -1){
         write_unlock(&(node->endpoint_rwlock));
-        pr_info("Publisher hasn't specified the signal to send to subrisbers. No signal will be sent.\n");
+        pr_info("Publisher hasn't specified the signal to send to subscribers. No signal will be sent.\n");
         return written_bytes;
     }
     
@@ -664,12 +668,14 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         return written_bytes;
     }
 
-    node->n_read = 0;
-
     info.si_signo = node->signal_nr;
     info.si_int = 1;
 
     write_lock(&topic_list_rwlock);
+    node->n_read = 0;
+    node->n_subscriber += node->n_new_subscriber;
+    node->n_new_subscriber = 0;
+
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
         pid_entry = list_entry(ptr, struct pid_node, list);
         pid = find_vpid(pid_entry->pid);
@@ -679,6 +685,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
             pr_alert("ERROR: unable to send signal\n"); /* when process has been killed, it's not removed from the list */
         }
     }
+    node->is_reading = true;
     write_unlock(&topic_list_rwlock);
 
     write_unlock(&(node->endpoint_rwlock));
@@ -736,7 +743,6 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
 
     *offset += bytes_read; 
     flag = 1; 
-
     read_unlock(&(node->endpoint_rwlock));  
 
     return bytes_read;
