@@ -1,0 +1,159 @@
+
+\documentclass[10pt,a4]{article}
+\usepackage[english]{babel}
+\usepackage[utf8x]{inputenc}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage[colorinlistoftodos]{todonotes}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{float}
+\usepackage{xkeyval}
+\usepackage[export]{adjustbox}
+\geometry{top=3cm,left=2cm,right=2cm,bottom=3cm}
+\usepackage[scaled]{helvet}
+\usepackage[T1]{fontenc}
+\renewcommand\familydefault{\sfdefault}
+
+
+\author{Ottavia Belotti\quad Riccardo Izzo}
+\date{\today}
+\title{Publisher/Subscriber IPC}
+
+
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Project data}
+
+\begin{itemize}
+\item 
+  Project supervisor(s): Federico Reghenzani
+
+\item 
+Project team:
+
+\begin{center}
+\begin{tabular}{lll}
+Last and first name & Person code & Email address\\
+\hline
+  Belotti Ottavia & 10657411 & ottavia.belotti@mail.polimi.it \\
+  Izzo Riccardo & 10599996 & riccardo.izzo@mail.polimi.it                     
+\end{tabular}
+\end{center}
+
+\item
+Subdivision of development tasks:\\
+\textbf{Ottavia Belotti}:
+\begin{itemize}
+  \item subscriber\_write: write function for subscribe device file
+  \item signal\_nr\_write: write function for signal\_nr device file
+  \item endpoint\_write: write function for endpoint device file
+  \item permissions of device files
+  \item concurrency
+\end{itemize}
+
+\textbf{Riccardo Izzo}:
+\begin{itemize}
+  \item new\_topic\_write: write function for new\_topic device file
+  \item release\_file: function that release all the device files when unloading the module
+  \item subs\_list\_read: read function for subscribers\_list device file
+  \item endpoint\_read: read function for endpoint device file
+  \item ownership of device files
+\end{itemize}
+
+\item Links to the project source code: \url{https://github.com/RiccardoIzzo/AOS-Publisher-Subscriber-IPC}
+
+\end{itemize}
+
+
+\section{Project description}
+
+\begin{itemize}
+\item What is your project about?\\
+The project consists in the implementation of a Linux kernel module that introduce an IPC mechanism based on the publisher/subscriber model, 
+this IPC mechanism is not originally supported on Linux systems.
+The main idea is to have a publisher that writes a message on a topic, all the subscribers are notified through a POSIX signal that there is a message ready to be read.
+
+\item Why it is important for the AOS course?\\
+Inter-Process Communication mechanisms are essential in multitasking operating systems, they allow different processes to communicate and exchange information.
+The POSIX library is the one that provides IPC and is supported in the majority of Linux distribution.
+Moreover kernel modules are important because allow to extend the base kernel without rebuilding the kernel or rebooting the computer.
+Finally this project represents an excellent opportunity to put in practice what was studied in the AOS course.
+\end{itemize}
+
+\subsection{Design and implementation}
+The linux kernel module has been written in C and has been tested on Ubuntu 20.04 LTS on x86 architecture.
+As every kernel module there are two functions that manage the loading and the unloading of the module:
+
+\begin{itemize}
+  \item \textbf{psipc\_init}: called when the module is loaded with \textit{insmod} command, it initializes the list of topics and creates the new\_topic device file.
+  \item \textbf{psipc\_exit}: called when the module is unloaded with \textit{rmmod} command, it deletes the list of topics and unregisters all the device files created for every topic.
+\end{itemize}
+
+\begin{center}
+  \begin{figure}[H]
+      \includegraphics[scale=0.50, center]{assets/psipc_scheme.png}
+      \caption{Psipc directory scheme}
+      \label{fig: psipc_scheme}
+  \end{figure}
+\end{center}
+
+The module manages the following device files:
+\begin{itemize}
+  \item \textbf{new\_topic}: device file responsible of the creation of the topics, whenever the publisher writes here a new topic is created in the /dev/psipc/topics folder
+  \item \textbf{subscribe}: device file that manages the registration of the subscribers, a process can write its PID here to subscribe itself to the topic. His pid is added to the list of PID associated to the topic.
+  \item \textbf{subscribers\_list}: device file that manages the list of subscribers pid, a process can retrieve the list of PID by reading it
+  \item \textbf{signal\_nr}: device file that manages the signal to send to the subscribers, the publisher can write here the numerical value associated to the POSIX signal.
+  If the signal hasn't been set no message is sent to the subscribers.
+  \item \textbf{endpoint}: the only device file that can be opened both in read and write mode.
+  It is opened in write mode by the publisher that writes here the message, now a signal is sent to all the subscribers to notify them that they can read the message.
+  To do so the subscribers open the device file in read mode and retrieve the last message.
+  Note that a publisher cannot write a new message until all the notified subscribers have read the previous one.
+
+\end{itemize}
+
+\section{Project outcomes}
+
+\subsection{Concrete outcomes}
+The only artifact is \textbf{psipc\_kmodule.c}, the linux kernel module.
+With the makefile is possible to compile it and obtain psipc\_kmodule.ko, the loadable kernel object.
+To load the module simply run in the terminal "sudo insmod psipc\_kmodule.ko", now it is successfully loaded.
+
+\subsection{Learning outcomes}
+
+Fundamentally we both learned how to develop an out-of-tree linux kernel module.
+We both understood that errors at kernel-level are not tolerated and usually result in a system crash, to avoid them is necessary the utmost attention to details.
+Another important thing we learned is the use of device files, we managed to let processes in user-space communicate with the module in kernel-space through them.
+We understood that each device file acts as an interface meaning that data is not actually stored in the file but copied from the user-space to the kernel-space and viceversa.
+Finally we learned how to use spinlocks and atomic operations in order to write concurrent code.
+
+\subsection{Existing knowledge}
+\begin{itemize}
+  \item \textbf{Advanced Operating Systems (AOS)}: understanding of the linux kernel, IPC mechanisms, device files, POSIX signals, kernel concurrency
+  \item \textbf{Architettura dei Calcolatori e Sistemi Operativi (ACSO)}: basic understanding of operating systems
+  \item \textbf{Fondamenti di Informatica}: C programming
+  \item \textbf{Algoritmi e Principi dell'informatica (API)}: space and time complexity of the algorithms
+\end{itemize}
+
+\subsection{Problems encountered}
+We had some problems setting the owner of the device files without using user-level known functions like \textit{chown()}. At the end we solved it by directly editing the uid and gid fields in the inode struct associated to the device file.
+Another problem was how to manage input from user-space, we learned to use get\_user() and put\_user() functions.
+
+\section{Honor Pledge}
+
+We pledge that this work was fully and wholly completed within the criteria
+established for academic integrity by Politecnico di Milano (Code of Ethics and
+Conduct) and represents our original production, unless otherwise cited.\\
+We also understand that this project, if successfully graded, will fulfill part B requirement of the
+Advanced Operating System course and that it will be considered valid up until
+the AOS exam of Sept. 2022. 
+
+\begin{flushright}
+Group Students' signatures
+\end{flushright}
+
+
+\end{document}
