@@ -14,6 +14,7 @@
 \usepackage[scaled]{helvet}
 \usepackage[T1]{fontenc}
 \renewcommand\familydefault{\sfdefault}
+\newcommand{\code}[1]{\texttt{#1}}
 
 
 \author{Ottavia Belotti\quad Riccardo Izzo}
@@ -74,23 +75,24 @@ Subdivision of development tasks:\\
 \begin{itemize}
 \item What is your project about?\\
 The project consists in the implementation of a Linux kernel module that introduce an IPC mechanism based on the publisher/subscriber model, 
-this IPC mechanism is not originally supported on Linux systems.
-The main idea is to have a publisher that writes a message on a topic, all the subscribers are notified through a POSIX signal that there is a message ready to be read.
+since this IPC mechanism is not natively supported on Linux systems.
+The main idea is to have a publisher that writes a message on a topic, all the subscribers to that topic are notified through a POSIX signal, chosen by the publisher, that there is a message ready to be read.
 
 \item Why it is important for the AOS course?\\
 Inter-Process Communication mechanisms are essential in multitasking operating systems, they allow different processes to communicate and exchange information.
 The POSIX library is the one that provides IPC and is supported in the majority of Linux distribution.
 Moreover kernel modules are important because allow to extend the base kernel without rebuilding the kernel or rebooting the computer.
-Finally this project represents an excellent opportunity to put in practice what was studied in the AOS course.
+Finally, this project represents an excellent opportunity to deal with concurrency issues that arise from processes parallelism of preemptive kernels or multiprocessors architectures. So this project integrates very well with the AOS topics and teaching purposes.
 \end{itemize}
 
 \subsection{Design and implementation}
-The linux kernel module has been written in C and has been tested on Ubuntu 20.04 LTS on x86 architecture.
-As every kernel module there are two functions that manage the loading and the unloading of the module:
+The linux kernel module has been written in C, naturally integrating within the Linux OS. Although it has been built and tested on Ubuntu 20.04 LTS on x86 architecture, it should work on every architecture supporting Linux OS thanks to the architecture-specific libraries used underneath.
+
+As in every kernel modules, there are two functions that manage the loading and the unloading of the module:
 
 \begin{itemize}
-  \item \textbf{psipc\_init}: called when the module is loaded with \textit{insmod} command, it initializes the list of topics and creates the new\_topic device file.
-  \item \textbf{psipc\_exit}: called when the module is unloaded with \textit{rmmod} command, it deletes the list of topics and unregisters all the device files created for every topic.
+  \item \textbf{psipc\_init}: called when the module is loaded with \code{insmod} command, it initializes the list of topics and creates the new\_topic device file.
+  \item \textbf{psipc\_exit}: called when the module is unloaded with \code{rmmod} command, it deletes the list of topics and unregisters all the device files created for every topic.
 \end{itemize}
 
 \begin{center}
@@ -103,11 +105,11 @@ As every kernel module there are two functions that manage the loading and the u
 
 The module manages the following device files:
 \begin{itemize}
-  \item \textbf{new\_topic}: device file responsible of the creation of the topics, whenever the publisher writes here a new topic is created in the /dev/psipc/topics folder
-  \item \textbf{subscribe}: device file that manages the registration of the subscribers, a process can write its PID here to subscribe itself to the topic. His pid is added to the list of PID associated to the topic.
-  \item \textbf{subscribers\_list}: device file that manages the list of subscribers pid, a process can retrieve the list of PID by reading it
+  \item \textbf{new\_topic}: device file responsible of the creation of the topics; whenever the publisher writes here, a new topic is created in the /dev/psipc/topics folder
+  \item \textbf{subscribe}: device file that manages the registration of the subscribers, a process can write its PID here to subscribe itself to the topic. Its pid is added to the list of PIDs associated to the topic.
+  \item \textbf{subscribers\_list}: device file that manages the list of subscribers pid, a process can retrieve the list of PIDs by reading it
   \item \textbf{signal\_nr}: device file that manages the signal to send to the subscribers, the publisher can write here the numerical value associated to the POSIX signal.
-  If the signal hasn't been set no message is sent to the subscribers.
+  If the signal hasn't been set, no message is sent to the subscribers.
   \item \textbf{endpoint}: the only device file that can be opened both in read and write mode.
   It is opened in write mode by the publisher that writes here the message, now a signal is sent to all the subscribers to notify them that they can read the message.
   To do so the subscribers open the device file in read mode and retrieve the last message.
@@ -115,12 +117,17 @@ The module manages the following device files:
 
 \end{itemize}
 
+\subsubsection*{Concurrency}
+Given the natural tendecy of the files managed by the module to be opened by multiple processes at the same time, syncronization among them is crucial. 
+%Tell our design choice: fine grain or not. What can and cannot be read/written in parallel
+
 \section{Project outcomes}
 
 \subsection{Concrete outcomes}
 The only artifact is \textbf{psipc\_kmodule.c}, the linux kernel module.
 With the makefile is possible to compile it and obtain psipc\_kmodule.ko, the loadable kernel object.
-To load the module simply run in the terminal "sudo insmod psipc\_kmodule.ko", now it is successfully loaded.
+
+To load the module simply run in the terminal \code{sudo insmod psipc\_kmodule.ko}. By checking the kernel message buffer through \code{dmesg} command, the module has been started up correctly if the new\_topic device major number is printed.
 
 \subsection{Learning outcomes}
 
@@ -139,8 +146,11 @@ Finally we learned how to use spinlocks and atomic operations in order to write 
 \end{itemize}
 
 \subsection{Problems encountered}
-We had some problems setting the owner of the device files without using user-level known functions like \textit{chown()}. At the end we solved it by directly editing the uid and gid fields in the inode struct associated to the device file.
-Another problem was how to manage input from user-space, we learned to use get\_user() and put\_user() functions.
+Since the creation of every device driver file has been delegated to the psipc module running in kernel-mode, \code{root} was the natural owner of those file. Initially, we set the access mode for those file operating mainly on the \textit{Other} permissions to let user processes interact with them. But soon we realised that this method could lead to security issues. In fact, in this way the user creating a new topic or joining one as subscriber had the same privileges of other users in the machine, so giving the read/write permissions to the rightful logical owner (labeled as "other" from the kernel point of view) of the topic meant giving the same permission to anyone else on the system. It was mandatory to think of another way to compartmentalize different users so that a potential threathening one could not interact with another one. For this reason, we decided to let the kernel yields its ownership of the topic directory and files to the user actually requesting it. This brought some problems in identifying the right way to do it from the module code. User-level well known functions for this operation, like \code{chown()}, were out of question, their kernel versions, like \code{ksys\_fchown()}, work just for legacy systems or require the \code{struct file} pointer to the actual file (but opening a file for kernel purposes is no good) and directly calling a system call from kernel code is not advisable too. So, with little to no help for solving this particular issue from the web, we had to learn more about inodes, files as seen by the kernel. Finally, we solved it by directly editing the \code{uid} and \code{gid} fields in the \code{inode} struct associated to the device.
+
+Another minor problem was how to manage input from user-space, we learned to use \code{get\_user()} and \code{put\_user()} functions.
+
+Another challenge was deciding the grain of concurrent accesses to allow within the psipc subsystem. Being all about users and multiple processes interacting with a restricted pool of resources, it is necessary to coordinate them to ensure fairness and well updated data. It's a fact that writing application taking parallellism into consideration is hard, mainly because of the infinite combination of processes schedules and that testing doesn't help much as we would want to. The big difference is that all the resources of a topic are strongly connected, but at the same time the module consist majorly in IO operations that would greatly undermine general performance of the ecosystem if we locked everything. %Add final decision
 
 \section{Honor Pledge}
 
