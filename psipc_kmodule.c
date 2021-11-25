@@ -117,15 +117,15 @@ static struct topic_node{
     int n_read;                                     /* number of read operations executed on endpoint by the subscribers */
     int n_subscriber;                               /* total number of subscribers that will/are currently reading the message */
     int n_new_subscriber;                           /* number of subscribers that arrive while a signal has already been sent and other
-                                                    subscribers are potentially reading the message. The new subscribers won't read it.*/
+                                                     *  subscribers are potentially reading the message. The new subscribers won't read it.*/
     char *message;                                  /* message written to endpoint */
-    bool is_reading;                        /* true if a signal has been sent. It goes back to false when publisher wants
-                                                    to write again a message. */
+    bool is_reading;                                /* true if a signal has been sent. It goes back to false when publisher wants
+                                                     * to write again a message. */
 
     /* Concurrency */
     rwlock_t subscribe_rwlock;          /* read-write lock for interaction between read operations on subscribers_list file 
                                          * and write operations on subscribe file. */
-    rwlock_t signal_nr_rwlock;            /* at most one publisher is allowed to write on the signal_nr device file.
+    rwlock_t signal_nr_rwlock;          /* at most one publisher is allowed to write on the signal_nr device file.
                                          * Endpoint cannot be written if the publisher is writing the signal on signal_nr
                                          * file and viceversa. */
     rwlock_t endpoint_rwlock;           /* read-write lock for interaction between read operations and write operations on endpoint file. */
@@ -287,6 +287,20 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 
     strcpy(dir, TOPICS_PATH);
     strcat(dir, msg);
+
+    /* Check if already exists a topic with the same name */
+    struct topic_node *ptr;
+    read_lock(&topic_list_rwlock);
+    if(!(list_empty(&topic_list_head))){
+        list_for_each_entry(ptr, &topic_list_head, list){
+            if(strcmp(ptr->dir_name, dir) == 0){
+                pr_info("Already exists a topic with the name: %s\n", msg);
+                read_unlock(&topic_list_rwlock);
+                return EINVAL;
+            }
+        }
+    }
+    read_unlock(&topic_list_rwlock);
 
     if(!(elem = (struct topic_node*)kmalloc(sizeof(*elem), GFP_KERNEL))){
         pr_alert("kmalloc: ERROR: cannot allocate memory for the topic_node\n");
