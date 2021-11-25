@@ -26,6 +26,11 @@ sudo rmmod psipc_module
 ```
 
 ## Purpose of the project & How to use it
+The module creates a tree-structure in the /dev directory that, once the module has been loaded succesfully, will resemble the one proposed below.
+![image](assets/psipc_scheme.png)
+A user process that acts as a publisher has to request the creation of the desired topic by writing its name on the `new_topic` file (in /dev/psipc). The module creates a new directory specific to that topic with all the necessary files related to it: `subscribe`, `subscribers_list`, `signal_nr` and `endpoint`.
+Once this has been set up, other user processes running under the same user space as the publisher can:
+* Subscribe to the topic: writing 
 
 ## Development Environment
 The module has been developed in **Ubuntu 20.04 LTS** distro with development tools on a Virtual Machine. 

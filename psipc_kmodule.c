@@ -125,7 +125,7 @@ static struct topic_node{
     /* Concurrency */
     rwlock_t subscribe_rwlock;          /* read-write lock for interaction between read operations on subscribers_list file 
                                          * and write operations on subscribe file. */
-    atomic_t signal_nr_atom;            /* at most one publisher is allowed to write on the signal_nr device file.
+    rwlock_t signal_nr_rwlock;            /* at most one publisher is allowed to write on the signal_nr device file.
                                          * Endpoint cannot be written if the publisher is writing the signal on signal_nr
                                          * file and viceversa. */
     rwlock_t endpoint_rwlock;           /* read-write lock for interaction between read operations and write operations on endpoint file. */
@@ -298,7 +298,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     elem->n_subscriber = 0;
     elem->n_new_subscriber = 0;
     elem->is_reading = false;
-    atomic_set(&(elem->signal_nr_atom), CDEV_NOT_USED);
+    rwlock_init(&(elem->signal_nr_rwlock));
     rwlock_init(&(elem->subscribe_rwlock));
     rwlock_init(&(elem->endpoint_rwlock));
     
@@ -520,8 +520,7 @@ static int signal_nr_open(struct inode *inode, struct file *file){
     dentry = file->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
 
-    if (atomic_cmpxchg(&(node->signal_nr_atom), CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
-        return -EBUSY;
+    write_lock(&(node->signal_nr_rwlock));
 
     try_module_get(THIS_MODULE);
     return SUCCESS;
@@ -537,7 +536,7 @@ static int signal_nr_release(struct inode *inode, struct file *file){
     dentry = file->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
     
-    atomic_set(&(node->signal_nr_atom), CDEV_NOT_USED);
+    write_unlock(&(node->signal_nr_rwlock));
 
     module_put(THIS_MODULE);
     return SUCCESS;
@@ -584,12 +583,6 @@ static int endpoint_open(struct inode *inode, struct file *file){
     char *dentry;
     struct topic_node *node;
 
-    dentry = file->f_path.dentry->d_parent->d_iname;
-    node = search_node(dentry);
-
-    if (atomic_cmpxchg(&(node->signal_nr_atom), CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
-        return -EBUSY;
-
     try_module_get(THIS_MODULE);
     return SUCCESS;
 }
@@ -603,8 +596,6 @@ static int endpoint_release(struct inode *inode, struct file *file){
 
     dentry = file->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
-
-    atomic_set(&(node->signal_nr_atom), CDEV_NOT_USED);
 
     module_put(THIS_MODULE);
     return SUCCESS;
@@ -629,7 +620,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         pr_alert("Node not found\n");
         return EFAULT;
     }
-
+    read_lock(&(node->signal_nr_rwlock));
     write_lock(&(node->endpoint_rwlock));
     if(node->message!=NULL && node->n_read < node->n_subscriber){
         /* not all the subscribers have finished to read the previous message, so do not write again yet */
@@ -689,6 +680,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     write_unlock(&topic_list_rwlock);
 
     write_unlock(&(node->endpoint_rwlock));
+    read_unlock(&(node->signal_nr_rwlock));
 
     return written_bytes;
 }
