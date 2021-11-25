@@ -15,7 +15,7 @@ make
 
 After compilation, to insert the module in the current system:
 ```Shell
-#optional: clean the kernel log before insertion
+#optional: clean the kernel message buffer before insertion
 sudo dmesg -C
 sudo insmod psipc_module.ko
 ```
@@ -27,10 +27,36 @@ sudo rmmod psipc_module
 
 ## Purpose of the project & How to use it
 The module creates a tree-structure in the /dev directory that, once the module has been loaded succesfully, will resemble the one proposed below.
-![image](assets/psipc_scheme.png)
-A user process that acts as a publisher has to request the creation of the desired topic by writing its name on the `new_topic` file (in /dev/psipc). The module creates a new directory specific to that topic with all the necessary files related to it: `subscribe`, `subscribers_list`, `signal_nr` and `endpoint`.
+```Shell
+/dev/psipc/
+        |   
+        |__ /new_topic
+        |__ /topics
+            |
+            |__ /my_topic_1
+            |   |
+            |   |__ /subscribe
+            |   |__ /subscribers_list
+            |   |__ /signal_nr
+            |   |__ /endpoint
+            |
+            |__ /my_topic_2
+            .   |
+            .   .
+            .   .
+```
+
+A user process that acts as a publisher has to request the creation of the desired topic by writing its name on the `new_topic` file. The module creates a new directory in /dev/psipc/topics specific to that topic with all the necessary files related to it: `subscribe`, `subscribers_list`, `signal_nr` and `endpoint`.
 Once this has been set up, other user processes running under the same user space as the publisher can:
-* Subscribe to the topic: writing 
+* __Subscribe to the topic__: write their PID in /subscribe. When a message will be published for that topic, the subscriber will receive a signal (following POSIX standard), chosen by the publisher
+* __Retrieve a list of all the subscribers__: read the /subscribers_list file to know the PIDs of all the processes currently subscribed to that topic
+* __Read the published message__: read the message from /endpoint
+
+The publisher can:
+* __Choose a signal__: choose a POSIX standard message by writing its number on /signal_nr file. Once the publisher write a new message, the signal will be sent to all the current subscribers of the topic. Writing more than once on /signal_nr overwrites the signal. If no signal is set, the module won't send anything to the subscribers. 
+> _Note_: not setting a signal doesn't mean that the message can't be written. It just won't notify the subscribers.
+* __Publish a message__: add a new message by writing it in /endpoint. If a signal has been set, the act of writing in here will notify the subscribers.
+> _Note_: A publisher can't write a new message if all the present subscribers have not read the previous one yet.
 
 ## Development Environment
 The module has been developed in **Ubuntu 20.04 LTS** distro with development tools on a Virtual Machine. 
