@@ -118,8 +118,15 @@ The module manages the following device files:
 \end{itemize}
 
 \subsubsection*{Concurrency}
-Given the natural tendecy of the files managed by the module to be opened by multiple processes at the same time, syncronization among them is crucial. 
-%Tell our design choice: fine grain or not. What can and cannot be read/written in parallel
+Given the natural tendecy of the files managed by the module to be opened by multiple processes at the same time, syncronization among them is crucial. Moreover, most of the services that the model has to provide to user processes consist in IO operations that generally might noticeably impact overall performance of the module in servicing the users' requests. 
+
+So, after pondering which may be the best fitting solution to deal with processes concurrency, we opted to protect critical sections through Linux \textit{read-write spinlocks} (from now on referred as \textit{rwlock}), since we forsee statistically more reading operations than writing ones: this method allows us to have multiple readers in parallel, especially when the subcribers are invited to go read the new published message in endpoint. Plus, the above-mentioned IO operations are just pseudo IO operations, considering that the module does not perform explicit storaging of data on secondary memory. Furthermore, we expect rather short strings to be written (i.e. PID values take up less than 10 digits at maximum, topics' name should be reasonably short), thus copying data from kernel buffer to user buffer and vice versa should not take long in any case.
+
+So to summarize, we believe that leaving processes spinning for a short period of time but allowing parallel readings is an acceptable compromise.
+
+In the end, the module has one shared \textit{rwlock} to do operations on the general list of all the topics managed by the module. In addition, each topic has 3 \textit{rwlocks} to protect sections modifying respectively the list of subscribers to that particular topic, the signal to send and the published message to be read.
+%TODO: check if they're only 3, since maybe we need 4 (even for pid_list)
+
 
 \section{Project outcomes}
 
