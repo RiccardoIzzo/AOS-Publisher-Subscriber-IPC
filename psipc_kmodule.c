@@ -22,23 +22,15 @@ static int new_topic_release(struct inode *, struct file *);
 static ssize_t new_topic_write(struct file *, const char __user *, size_t, loff_t *); 
 
 /* subscribe functions */
-//static int subscribe_open(struct inode*, struct file*);
-//static int subscribe_release(struct inode*, struct file*); 
 static ssize_t subscribe_write(struct file*, const char __user *, size_t, loff_t*);
 
 /* subscribers_list functions */
-//static int subs_list_open(struct inode*, struct file*);
-//static int subs_list_release(struct inode*, struct file*);
 static ssize_t subs_list_read(struct file*, char __user *, size_t, loff_t*);
 
 /* signal_nr functions */
-//static int signal_nr_open(struct inode*, struct file*);
-//static int signal_nr_release(struct inode*, struct file*);
 static ssize_t signal_nr_write(struct file*, const char __user *, size_t, loff_t*);
 
 /* endpoint functions */
-//static int endpoint_open(struct inode*, struct file*);
-//static int endpoint_release(struct inode*, struct file*);
 static ssize_t endpoint_write(struct file*, const char __user *, size_t, loff_t*);
 static ssize_t endpoint_read(struct file*, char __user *, size_t, loff_t*);
 
@@ -371,7 +363,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 }
 
 /*
-* Called whenever a process attempts to open the subscribe device file.
+* Called whenever a process attempts to open one device driver file among: subscribe, subscribers_list, signal_nr and endpoint.
 */
 static int topic_files_open(struct inode *inode, struct file *file){
     try_module_get(THIS_MODULE);
@@ -380,7 +372,7 @@ static int topic_files_open(struct inode *inode, struct file *file){
 }
 
 /* 
-* Called when a process closes the subscribe device file.
+* Called when a process closes one device driver file among: subscribe, subscribers_list, signal_nr and endpoint.
 */
 static int topic_files_release(struct inode *inode, struct file *file){
     module_put(THIS_MODULE);
@@ -438,21 +430,6 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
     return bytes_written;
 }
 
-/*
-* Called whenever a process attempts to open the subscribers_list device file.
-*/
-/*static int subs_list_open(struct inode *inode, struct file *file){
-    try_module_get(THIS_MODULE);
-    return SUCCESS;
-}*/
-
-/* 
-* Called when a process closes the subscribers_list device file.
-*/
-/*static int subs_list_release(struct inode *inode, struct file *file){
-    module_put(THIS_MODULE);
-    return SUCCESS;
-}*/
 
 /*
 * Called when a process, which already opened the subscribers_list device file, attempts to read from it.
@@ -509,22 +486,6 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
     return bytes_read;
 }
 
-/*
-* Called whenever a process attempts to open the signal_nr device file.
-*/
-/*static int signal_nr_open(struct inode *inode, struct file *file){
-    try_module_get(THIS_MODULE);
-    return SUCCESS;
-}*/
-
-/* 
-* Called when a process closes the signal_nr device file.
-*/
-/*static int signal_nr_release(struct inode *inode, struct file *file){
-    module_put(THIS_MODULE);
-    return SUCCESS;
-}*/
-
 /* 
 * Called when a process writes to the signal_nr device file.
 * Each time the publisher rewrites on signal_nr file, the signal is overwritten.
@@ -562,22 +523,6 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
 
     return written_bytes;
 }
-
-/*
-* Called whenever a process attempts to open the endpoint device file.
-*/
-/*static int endpoint_open(struct inode *inode, struct file *file){ 
-    try_module_get(THIS_MODULE);
-    return SUCCESS;
-}*/
-
-/* 
-* Called when a process closes the endpoint device file.
-*/
-/*static int endpoint_release(struct inode *inode, struct file *file){
-    module_put(THIS_MODULE);
-    return SUCCESS;
-}*/
 
 /* 
 * Called when a process writes to the endpoint device file
@@ -622,18 +567,23 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     }
 
     if(!(node->message = (char*)kmalloc(sizeof(written_bytes + 1), GFP_KERNEL))){
+        write_unlock(&(node->endpoint_rwlock));
+        read_unlock(&(node->signal_nr_rwlock));
         pr_alert("kmalloc: ERROR: cannot allocate memory for node->message\n");
+        return -ENOMEM;
     }
     strcpy(node->message, msg);
 
     if((node->signal_nr) == -1){
         write_unlock(&(node->endpoint_rwlock));
+        read_unlock(&(node->signal_nr_rwlock));
         pr_info("Publisher hasn't specified the signal to send to subscribers. No signal will be sent.\n");
         return written_bytes;
     }
     
     if(list_empty(&(node->pid_list_head))){
         write_unlock(&(node->endpoint_rwlock));
+        read_unlock(&(node->signal_nr_rwlock));
         pr_info("No subscribers to notify. Message is discarded.\n");
         return written_bytes;
     }
@@ -641,7 +591,6 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     info.si_signo = node->signal_nr;
     info.si_int = 1;
 
-    write_lock(&topic_list_rwlock);
     node->n_read = 0;
     node->n_subscriber += node->n_new_subscriber;
     node->n_new_subscriber = 0;
@@ -656,7 +605,6 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         }
     }
     node->is_reading = true;
-    write_unlock(&topic_list_rwlock);
 
     write_unlock(&(node->endpoint_rwlock));
     read_unlock(&(node->signal_nr_rwlock));
