@@ -111,7 +111,7 @@ static struct topic_node{
     int n_read;                                     /* number of read operations executed on endpoint by the subscribers */
     int n_subscriber;                               /* total number of subscribers that will/are currently reading the message */
     int n_new_subscriber;                           /* number of subscribers that arrive while a signal has already been sent and other
-                                                     *  subscribers are potentially reading the message. The new subscribers won't read it.*/
+                                                     * subscribers are potentially reading the message. The new subscribers won't read it.*/
     char *message;                                  /* message written to endpoint */
     bool is_reading;                                /* true if a signal has been sent. It goes back to false when publisher wants
                                                      * to write again a message. */
@@ -127,7 +127,8 @@ static struct topic_node{
 
 /* pid_node struct is a node in the list of subscribers' pids to a specific topic_node: topic_node.pid_list_head*/
 static struct pid_node{
-    int pid;
+    int pid;                /* pid of the subscriber */
+    bool has_been_notified; /* indicates if the subscriber has already been notified with the signal */
     struct list_head list;
 };
 
@@ -400,6 +401,7 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
         return -ENOMEM;
     }
     pid_node->pid = pid_atoi(msg);
+    pid_node->has_been_notified = false;
     if(pid_node->pid <0){
         pr_alert("ERROR: %s is not a pid\n", msg);
         return bytes_written;
@@ -543,6 +545,22 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         pr_alert("Node not found\n");
         return EFAULT;
     }
+
+    /* delete from the list all the subscribers that are no longer alive */
+    int counter = 0;
+    list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
+        pid_entry = list_entry(ptr, struct pid_node, list);
+        counter++;
+        pid = find_vpid(pid_entry->pid);
+        if(kill_pid(pid, 0, &info) < 0) {
+            if(pid_entry->has_been_notified) node->n_subscriber--;
+            else node->n_new_subscriber--;
+            list_del(ptr);
+            pr_alert("ERROR: subscriber %d is no longer alive and will be eliminated from the list\n", pid_entry->pid);
+        }
+    }
+    if(counter = 0) node->n_subscriber = 0;
+
     read_lock(&(node->signal_nr_rwlock));
     write_lock(&(node->endpoint_rwlock));
     if(node->message!=NULL && node->n_read < node->n_subscriber){
@@ -594,6 +612,11 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     node->n_read = 0;
     node->n_subscriber += node->n_new_subscriber;
     node->n_new_subscriber = 0;
+    /* reset the flag has_been_notified for every subscriber */
+    list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
+        pid_entry = list_entry(ptr, struct pid_node, list);
+        pid_entry->has_been_notified = false;
+    }
 
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
         pid_entry = list_entry(ptr, struct pid_node, list);
@@ -603,6 +626,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
             node->n_subscriber--;
             pr_alert("ERROR: unable to send signal\n"); /* when process has been killed, it's not removed from the list */
         }
+        else pid_entry->has_been_notified = true;
     }
     node->is_reading = true;
 
