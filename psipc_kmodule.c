@@ -96,6 +96,11 @@ enum {
     CDEV_NOT_USED = 0, 
     CDEV_EXCLUSIVE_OPEN = 1, 
 };
+
+enum{
+    FALSE =  0,
+    TRUE = 1,
+};
  
 static atomic_t new_topic_already_open = ATOMIC_INIT(CDEV_NOT_USED); /* to not have more publisher request for a new topic concurrently */
 static DEFINE_RWLOCK(topic_list_rwlock);                             /* to sync operations on topic_list_head list */
@@ -113,7 +118,7 @@ static struct topic_node{
     int n_new_subscriber;                           /* number of subscribers that arrive while a signal has already been sent and other
                                                      * subscribers are potentially reading the message. The new subscribers won't read it.*/
     char *message;                                  /* message written to endpoint */
-    bool is_reading;                                /* true if a signal has been sent. It goes back to false when publisher wants
+    atomic_t is_reading;                                /* true if a signal has been sent. It goes back to false when publisher wants
                                                      * to write again a message. */
 
     /* Concurrency */
@@ -128,7 +133,8 @@ static struct topic_node{
 /* pid_node struct is a node in the list of subscribers' pids to a specific topic_node: topic_node.pid_list_head*/
 static struct pid_node{
     int pid;                /* pid of the subscriber */
-    bool has_been_notified; /* indicates if the subscriber has already been notified with the signal */
+    atomic_t has_been_notified; /* indicates if the subscriber has already been notified with the signal */
+    atomic_t has_read; /*indicates if the subscriber has already read */
     struct list_head list;
 };
 
@@ -309,7 +315,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     elem->n_read = 0;
     elem->n_subscriber = 0;
     elem->n_new_subscriber = 0;
-    elem->is_reading = false;
+    atomic_set(&(elem->is_reading), FALSE);
     rwlock_init(&(elem->signal_nr_rwlock));
     rwlock_init(&(elem->subscribe_rwlock));
     rwlock_init(&(elem->endpoint_rwlock));
@@ -401,7 +407,8 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
         return -ENOMEM;
     }
     pid_node->pid = pid_atoi(msg);
-    pid_node->has_been_notified = false;
+    atomic_set(&(pid_node->has_been_notified), FALSE);
+    atomic_set(&(pid_node->has_read), FALSE);
     if(pid_node->pid <0){
         pr_alert("ERROR: %s is not a pid\n", msg);
         return bytes_written;
@@ -416,7 +423,7 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
 
     write_lock(&(node->subscribe_rwlock));
     
-    if(node->is_reading){
+    if(atomic_read(&(node->is_reading))){
         node->n_new_subscriber++;
     }else{
         node->n_subscriber++;
@@ -553,13 +560,18 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         counter++;
         pid = find_vpid(pid_entry->pid);
         if(kill_pid(pid, 0, &info) < 0) {
-            if(pid_entry->has_been_notified) node->n_subscriber--;
+            if(atomic_read(&(pid_entry->has_been_notified))){ 
+                node->n_subscriber--;
+                if(atomic_read(&(pid_entry->has_read))){
+                    node->n_read--;
+                }
+            }
             else node->n_new_subscriber--;
             list_del(ptr);
             pr_alert("ERROR: subscriber %d is no longer alive and will be eliminated from the list\n", pid_entry->pid);
         }
     }
-    if(counter = 0) node->n_subscriber = 0;
+    if(counter == 0) node->n_subscriber = 0;
 
     read_lock(&(node->signal_nr_rwlock));
     write_lock(&(node->endpoint_rwlock));
@@ -567,10 +579,11 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         /* not all the subscribers have finished to read the previous message, so do not write again yet */
         write_unlock(&(node->endpoint_rwlock));
         read_unlock(&(node->signal_nr_rwlock));
+        pr_alert("ERROR: read %d, subs %d\n", node->n_read, node->n_subscriber);
         return -EBUSY;
     }
     
-    node->is_reading = false;
+    atomic_set(&(node->is_reading), FALSE);
 
     for (i = 0; i < len && i < BUF_LEN; i++) 
         get_user(msg[i], buff + i);
@@ -615,7 +628,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     /* reset the flag has_been_notified for every subscriber */
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
         pid_entry = list_entry(ptr, struct pid_node, list);
-        pid_entry->has_been_notified = false;
+        atomic_set(&(pid_entry->has_been_notified), FALSE);
     }
 
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
@@ -626,9 +639,9 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
             node->n_subscriber--;
             pr_alert("ERROR: unable to send signal\n"); /* when process has been killed, it's not removed from the list */
         }
-        else pid_entry->has_been_notified = true;
+        else atomic_set(&(pid_entry->has_been_notified), TRUE);
     }
-    node->is_reading = true;
+    atomic_set(&(node->is_reading), TRUE);
 
     write_unlock(&(node->endpoint_rwlock));
     read_unlock(&(node->signal_nr_rwlock));
@@ -682,6 +695,7 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
         } 
     }
 
+    atomic_set(&(pidNode->has_read), TRUE);
     node->n_read++;
 
     read_unlock(&(node->endpoint_rwlock));
