@@ -695,9 +695,12 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
         } 
     }
 
-    atomic_set(&(pidNode->has_read), TRUE);
-    node->n_read++;
-
+    /* it's the first time for this pid reading this current message*/
+    if(!atomic_read(&(pidNode->has_read))){
+        atomic_set(&(pidNode->has_read), TRUE);
+        node->n_read++;
+    }
+    
     read_unlock(&(node->endpoint_rwlock));
 
     *offset += bytes_read; 
