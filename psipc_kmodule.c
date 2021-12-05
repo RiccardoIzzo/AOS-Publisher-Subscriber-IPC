@@ -571,7 +571,14 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
             pr_alert("ERROR: subscriber %d is no longer alive and will be eliminated from the list\n", pid_entry->pid);
         }
     }
-    if(counter == 0) node->n_subscriber = 0;
+    if(counter == 0){ 
+        node->n_subscriber = 0;
+        node->n_new_subscriber = 0;
+    }
+
+    if(node->n_subscriber == 0 && node->n_new_subscriber == 0){
+        pr_info("All old subs have died\n");
+    }
 
     read_lock(&(node->signal_nr_rwlock));
     write_lock(&(node->endpoint_rwlock));
@@ -613,6 +620,8 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     }
     
     if(list_empty(&(node->pid_list_head))){
+        kfree(node->message);
+        node->message = NULL;
         write_unlock(&(node->endpoint_rwlock));
         read_unlock(&(node->signal_nr_rwlock));
         pr_info("No subscribers to notify. Message is discarded.\n");
@@ -628,12 +637,9 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     /* reset the flag has_been_notified for every subscriber */
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
         pid_entry = list_entry(ptr, struct pid_node, list);
-        atomic_set(&(pid_entry->has_been_notified), FALSE);
-    }
-
-    list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
-        pid_entry = list_entry(ptr, struct pid_node, list);
         pid = find_vpid(pid_entry->pid);
+        atomic_set(&(pid_entry->has_been_notified), FALSE);
+        atomic_set(&(pid_entry->has_read), FALSE);
         if(kill_pid(pid, node->signal_nr, &info) < 0) {
             list_del(ptr);
             node->n_subscriber--;
@@ -696,7 +702,7 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     }
 
     /* it's the first time for this pid reading this current message*/
-    if(!atomic_read(&(pidNode->has_read))){
+    if(atomic_read(&(pidNode->has_read)) == FALSE){
         atomic_set(&(pidNode->has_read), TRUE);
         node->n_read++;
     }
