@@ -521,8 +521,16 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
     write_lock(&(node->signal_nr_rwlock));
 
     signal_nr = signal_atoi(msg);
-    if(signal_nr==EINVAL)
+    if(signal_nr==EINVAL){
+        write_unlock(&(node->signal_nr_rwlock));
+        pr_alert("ERROR: signal_nr_write: signal is not a number\n");
         return EINVAL;
+    }   
+    if(signal_nr < 0){
+        write_unlock(&(node->signal_nr_rwlock));
+        pr_alert("ERROR: signal_nr_wirte: negative signal is invalid.\n");
+        return EINVAL;
+    }
     node->signal_nr = signal_nr;
 
     write_unlock(&(node->signal_nr_rwlock));
@@ -613,9 +621,11 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     strcpy(node->message, msg);
 
     if((node->signal_nr) == -1){
+        kfree(node->message);
+        node->message = NULL;
         write_unlock(&(node->endpoint_rwlock));
         read_unlock(&(node->signal_nr_rwlock));
-        pr_info("Publisher hasn't specified the signal to send to subscribers. No signal will be sent.\n");
+        pr_info("Publisher hasn't specified the signal to send to subscribers. No signal will be sent and message is discarded.\n");
         return written_bytes;
     }
     
