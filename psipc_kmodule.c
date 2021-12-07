@@ -42,8 +42,6 @@ static ssize_t endpoint_read(struct file*, char __user *, size_t, loff_t*);
 static int topic_files_open(struct inode *, struct file *);
 static int topic_files_release(struct inode *, struct file *);
 static void release_files(void); 
-static void display_list(void);
-static void display_pid_list(struct list_head*);
 static struct pid_node* search_pid_node(struct list_head*);
 static struct topic_node* search_node(char*);  
 static int pid_atoi(char*);
@@ -797,43 +795,6 @@ static void release_files(void){
 
         write_unlock(&topic_list_rwlock);
     }
-}
-
-/*
-* It displays the list of topics.
-*/
-static void display_list(void){
-    int i = 0;
-    struct topic_node *entry, *entry_ptr;
-
-    read_lock(&topic_list_rwlock);
-    entry = list_first_entry_or_null(&topic_list_head, struct topic_node, list);
-    if(entry==NULL){
-        pr_info("Topic list is empty\n");
-        read_unlock(&topic_list_rwlock);
-        return;
-    }else{
-    pr_info("-------BEGIN_TOPIC_LIST--------\n");
-    list_for_each_entry(entry_ptr, &topic_list_head, list){
-        pr_info("Topic[%d]\n\tDir: %s\n", i++, entry_ptr->dir_name);
-    }
-    pr_info("------------END_TOPIC_LIST-------\n\n");
-    }
-    read_unlock(&topic_list_rwlock);
-}
-
-/*
-* It displays the list of pid of subscribed processes to a topic.
-*/
-static void display_pid_list(struct list_head *head){
-    struct pid_node *ptr;
-    int i=0;
-
-    pr_info("-------BEGIN_PID_LIST------\n");
-    list_for_each_entry(ptr, head, list){
-        pr_info("Pid[%d]: %d\n", i, ptr->pid);
-    }
-    pr_info("---------END_PID_LIST------\n\n");
 }
 
 /*
