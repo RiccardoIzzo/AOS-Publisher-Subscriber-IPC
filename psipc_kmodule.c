@@ -562,27 +562,28 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     }
 
     /* delete from the list all the subscribers that are no longer alive */
-    int counter = 0;
-    list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
-        pid_entry = list_entry(ptr, struct pid_node, list);
-        counter++;
-        pid = find_vpid(pid_entry->pid);
-        if(kill_pid(pid, 0, &info) < 0) {
-            if(atomic_read(&(pid_entry->has_been_notified))){ 
-                node->n_subscriber--;
-                if(atomic_read(&(pid_entry->has_read))){
-                    node->n_read--;
-                }
-            }
-            else node->n_new_subscriber--;
-            list_del(ptr);
-            pr_alert("ERROR: subscriber %d is no longer alive and will be eliminated from the list\n", pid_entry->pid);
-        }
-    }
-    if(counter == 0){ 
+    write_lock(&(node->subscribe_rwlock));
+    if(list_empty(&(node->pid_list_head))){
         node->n_subscriber = 0;
         node->n_new_subscriber = 0;
+    }else{
+        list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
+            pid_entry = list_entry(ptr, struct pid_node, list);
+            pid = find_vpid(pid_entry->pid);
+            if(kill_pid(pid, 0, &info) < 0) {
+                if(atomic_read(&(pid_entry->has_been_notified))){ 
+                    node->n_subscriber--;
+                    if(atomic_read(&(pid_entry->has_read))){
+                        node->n_read--;
+                    }
+                }
+                else node->n_new_subscriber--;
+                list_del(ptr);
+                pr_alert("ERROR: subscriber %d is no longer alive and will be eliminated from the list\n", pid_entry->pid);
+            }
+        }
     }
+    write_unlock(&(node->subscribe_rwlock));
 
     if(node->n_subscriber == 0 && node->n_new_subscriber == 0){
         pr_info("All old subs have died\n");
@@ -645,6 +646,8 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     node->n_subscriber += node->n_new_subscriber;
     node->n_new_subscriber = 0;
     /* reset the flag has_been_notified for every subscriber */
+    write_lock(&(node->subscribe_rwlock));
+
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
         pid_entry = list_entry(ptr, struct pid_node, list);
         pid = find_vpid(pid_entry->pid);
@@ -658,6 +661,8 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         else atomic_set(&(pid_entry->has_been_notified), TRUE);
     }
     atomic_set(&(node->is_reading), TRUE);
+    
+    write_unlock(&(node->subscribe_rwlock));
 
     write_unlock(&(node->endpoint_rwlock));
     read_unlock(&(node->signal_nr_rwlock));
