@@ -15,6 +15,10 @@
 #include <linux/cred.h>
 #include <linux/spinlock.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Ottavia Belotti and Riccardo Izzo");
+MODULE_DESCRIPTION("Publisher/subscriber IPC");
+MODULE_VERSION("1.0");
 
 /* new_topic functions */
 static int new_topic_open(struct inode *, struct file *); 
@@ -97,6 +101,7 @@ enum {
     CDEV_EXCLUSIVE_OPEN = 1, 
 };
 
+/* boolean */
 enum{
     FALSE =  0,
     TRUE = 1,
@@ -105,7 +110,7 @@ enum{
 static atomic_t new_topic_already_open = ATOMIC_INIT(CDEV_NOT_USED); /* to not have more publisher request for a new topic concurrently */
 static DEFINE_RWLOCK(topic_list_rwlock);                             /* to sync operations on topic_list_head list */
 
-/* topic_node struct represent a topic directory in /dev/psipc/topics */
+/* topic_node struct represents a topic directory in /dev/psipc/topics */
 static struct topic_node{
     char *dir_name;                                 /* path name of the topic */
     struct class file_dev_cls[NUM_SPECIAL_FILES];   /* array of struct class, one for every device file */
@@ -118,7 +123,7 @@ static struct topic_node{
     int n_new_subscriber;                           /* number of subscribers that arrive while a signal has already been sent and other
                                                      * subscribers are potentially reading the message. The new subscribers won't read it.*/
     char *message;                                  /* message written to endpoint */
-    atomic_t is_reading;                                /* true if a signal has been sent. It goes back to false when publisher wants
+    atomic_t is_reading;                            /* true if a signal has been sent. It goes back to false when publisher wants
                                                      * to write again a message. */
 
     /* Concurrency */
@@ -130,18 +135,18 @@ static struct topic_node{
     rwlock_t endpoint_rwlock;           /* read-write lock for interaction between read operations and write operations on endpoint file. */
 };
 
-/* pid_node struct is a node in the list of subscribers' pids to a specific topic_node: topic_node.pid_list_head*/
+/* pid_node struct is a node in the list of subscribers' pids to a specific topic_node */
 static struct pid_node{
-    int pid;                /* pid of the subscriber */
+    int pid;                    /* pid of the subscriber */
     atomic_t has_been_notified; /* indicates if the subscriber has already been notified with the signal */
-    atomic_t has_read; /*indicates if the subscriber has already read */
+    atomic_t has_read;          /* indicates if the subscriber has already read the message*/
     struct list_head list;
 };
 
 static struct list_head topic_list_head; /* head of list of struct topic_node */
 
-static int major; /* major number of the device file */
-static int flag = 0; /* global flag used in read functions */
+static int major;         /* major number of the device file */
+static int flag = 0;      /* global flag used in read functions */
 static char msg[BUF_LEN]; /* the msg the device will give when asked */ 
  
 static struct class *new_topic_cls; 
@@ -289,11 +294,10 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     strcpy(dir, TOPICS_PATH);
     strcat(dir, msg);
 
-    /* Check if already exists a topic with the same name */
     struct topic_node *ptr;
-
     read_lock(&topic_list_rwlock);
 
+    /* Check if already exists a topic with the same name */
     if(!(list_empty(&topic_list_head))){
         list_for_each_entry(ptr, &topic_list_head, list){
             if(strcmp(ptr->dir_name, dir) == 0){
@@ -344,7 +348,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
             cls->devnode = cls_set_writeOnly_permission;
         }else if(i==1){ /* subscribers_list device files */
             cls->devnode = cls_set_readOnly_permission;
-        }else{
+        }else{ /* endpoint device files */
             cls->devnode = cls_set_readAndWrite_permission; 
         }
         elem->devices[i] = MKDEV(created_sub, 0);
@@ -370,7 +374,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
 }
 
 /*
-* Called whenever a process attempts to open one device driver file among: subscribe, subscribers_list, signal_nr and endpoint.
+* Called whenever a process attempts to open one device file among: subscribe, subscribers_list, signal_nr and endpoint.
 */
 static int topic_files_open(struct inode *inode, struct file *file){
     try_module_get(THIS_MODULE);
@@ -379,7 +383,7 @@ static int topic_files_open(struct inode *inode, struct file *file){
 }
 
 /* 
-* Called when a process closes one device driver file among: subscribe, subscribers_list, signal_nr and endpoint.
+* Called when a process closes one device file among: subscribe, subscribers_list, signal_nr and endpoint.
 */
 static int topic_files_release(struct inode *inode, struct file *file){
     module_put(THIS_MODULE);
@@ -542,7 +546,7 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
 }
 
 /* 
-* Called when a process writes to the endpoint device file
+* Called when a process writes to the endpoint device file.
 */
 static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t len, loff_t *off){
     int i, written_bytes;
@@ -570,6 +574,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
             pid_entry = list_entry(ptr, struct pid_node, list);
             pid = find_vpid(pid_entry->pid);
+            /* it sends the null signal just to understand if the subscriber is still alive */
             if(kill_pid(pid, 0, &info) < 0) {
                 if(atomic_read(&(pid_entry->has_been_notified))){ 
                     node->n_subscriber--;
@@ -586,7 +591,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     write_unlock(&(node->subscribe_rwlock));
 
     if(node->n_subscriber == 0 && node->n_new_subscriber == 0){
-        pr_info("All old subs have died\n");
+        pr_info("All old subscribers are no longer alive.\n");
     }
 
     read_lock(&(node->signal_nr_rwlock));
@@ -621,6 +626,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     }
     strcpy(node->message, msg);
 
+    /* in case the publisher hasn't specified the signal to send */
     if((node->signal_nr) == -1){
         kfree(node->message);
         node->message = NULL;
@@ -630,6 +636,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
         return written_bytes;
     }
     
+    /* in case there are no subscribers */
     if(list_empty(&(node->pid_list_head))){
         kfree(node->message);
         node->message = NULL;
@@ -645,25 +652,26 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     node->n_read = 0;
     node->n_subscriber += node->n_new_subscriber;
     node->n_new_subscriber = 0;
-    /* reset the flag has_been_notified for every subscriber */
+
     write_lock(&(node->subscribe_rwlock));
 
+    /* send the signal to every subscriber */
     list_for_each_safe(ptr, temp_pid_node, &(node->pid_list_head)){
         pid_entry = list_entry(ptr, struct pid_node, list);
         pid = find_vpid(pid_entry->pid);
         atomic_set(&(pid_entry->has_been_notified), FALSE);
         atomic_set(&(pid_entry->has_read), FALSE);
+        /* if a subscriber is no longer alive the kill_pid() function returns a negative value, the number of subscribers is decreased and the corresponding pid_node is deleted */
         if(kill_pid(pid, node->signal_nr, &info) < 0) {
             list_del(ptr);
             node->n_subscriber--;
-            pr_alert("ERROR: unable to send signal\n"); /* when process has been killed, it's not removed from the list */
+            pr_alert("ERROR: unable to send signal\n");
         }
         else atomic_set(&(pid_entry->has_been_notified), TRUE);
     }
     atomic_set(&(node->is_reading), TRUE);
     
     write_unlock(&(node->subscribe_rwlock));
-
     write_unlock(&(node->endpoint_rwlock));
     read_unlock(&(node->signal_nr_rwlock));
 
@@ -752,6 +760,7 @@ static void release_files(void){
             entry_temp = list_entry(ptr1, struct topic_node, list);
             if(entry_temp!=NULL){
                 if(!list_empty(&(entry_temp->pid_list_head))){
+                    /* delete the list of pids */
                     list_for_each_safe(ptr2, temp2, &(entry_temp->pid_list_head)){
                         list_del(ptr2);
                     }
@@ -760,6 +769,7 @@ static void release_files(void){
                 }
                 pr_info("All pid freed\n");
 
+                /* delete the four device files */
                 for(n_files=0; n_files < NUM_SPECIAL_FILES; n_files++){
                     char *str = (char*)kmalloc(strlen(entry_temp->dir_name) + strlen(files[n_files]), GFP_KERNEL);
                     strcpy(str, entry_temp->dir_name);
@@ -771,6 +781,7 @@ static void release_files(void){
                     kfree(str);
                 }
                 
+                /* delete the message written in endpoint */
                 if(entry_temp->message != NULL){
                     kfree(entry_temp->message);
                     pr_info("Endpoint message freed");
@@ -853,7 +864,7 @@ static struct topic_node* search_node(char *dir){
 }
 
 /*
-* It searches in the list the correct pid_node
+* It searches in the list the correct pid_node.
 */
 static struct pid_node* search_pid_node(struct list_head *head){
     struct pid_node *ptr;
@@ -968,5 +979,3 @@ static int set_topic_ownership(const char *msg){
  
 module_init(psipc_init); 
 module_exit(psipc_exit); 
- 
-MODULE_LICENSE("GPL");
