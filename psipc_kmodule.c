@@ -53,7 +53,7 @@ static int set_topic_ownership(const char *msg);
 #define NEW_TOPIC_PATH "psipc/new_topic" /* new_topic device file path */ 
 #define TOPICS_PATH "psipc/topics/"      /* topic folder path */
 #define FULL_PATH "/dev/psipc/topics/"   /* topic folder full path */
-#define BUF_LEN 100                      /* max length of the message from the device */ 
+#define BUF_LEN 300                      /* max length of the message from the device */ 
 #define NUM_SPECIAL_FILES 4              /* number of device files for every topic */
 #define MAX_SIZE_PID 10                  /* on a 64-bit system the the max pid value is 4194304 */
  
@@ -145,7 +145,7 @@ static struct list_head topic_list_head; /* head of list of struct topic_node */
 
 static int major;         /* major number of the device file */
 static int flag = 0;      /* global flag used in read functions */
-static char msg[BUF_LEN]; /* the msg the device will give when asked */ 
+static char msg[BUF_LEN+1]; /* the msg the device will give when asked */ 
  
 static struct class *new_topic_cls; 
 
@@ -672,6 +672,12 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     write_unlock(&(node->subscribe_rwlock));
     write_unlock(&(node->endpoint_rwlock));
     read_unlock(&(node->signal_nr_rwlock));
+
+    /*Truncation of message*/
+    if(len > BUF_LEN){
+        pr_alert("Message has been truncated because it is too long. Max %d characters per message.\n", BUF_LEN);
+        written_bytes= len;
+    }
 
     return written_bytes;
 }
