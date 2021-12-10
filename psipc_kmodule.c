@@ -123,6 +123,7 @@ static struct topic_node{
     char *message;                                  /* message written to endpoint */
     atomic_t is_reading;                            /* true if a signal has been sent. It goes back to false when publisher wants
                                                      * to write again a message. */
+    atomic_t subs_read_flag;
 
     /* Concurrency */
     rwlock_t subscribe_rwlock;          /* read-write lock for interaction between read operations on subscribers_list file 
@@ -144,7 +145,6 @@ static struct pid_node{
 static struct list_head topic_list_head; /* head of list of struct topic_node */
 
 static int major;         /* major number of the device file */
-static int flag = 0;      /* global flag used in read functions */
 static char msg[BUF_LEN+1]; /* the msg the device will give when asked */ 
  
 static struct class *new_topic_cls; 
@@ -318,6 +318,7 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     elem->n_subscriber = 0;
     elem->n_new_subscriber = 0;
     atomic_set(&(elem->is_reading), FALSE);
+    atomic_set(&(elem->subs_read_flag), FALSE);
     rwlock_init(&(elem->signal_nr_rwlock));
     rwlock_init(&(elem->subscribe_rwlock));
     rwlock_init(&(elem->endpoint_rwlock));
@@ -450,12 +451,6 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
     struct topic_node *node;
     char *dentry;
 
-    if (flag) { /* we are at the end of message */
-        flag = 0; /* reset the flag */
-        *offset = 0; /* reset the offset */
-        return 0; /* signify end of file */
-    } 
-
     dentry = filp->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
 
@@ -463,14 +458,20 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
         pr_alert("Node not found.\n");
         return -EINVAL;
     }
+
+    if (atomic_read(&(node->subs_read_flag)) == TRUE) { /* we are at the end of message */
+        atomic_set(&(node->subs_read_flag), FALSE);
+        *offset = 0; /* reset the offset */
+        return 0; /* signify end of file */
+    } 
+
     read_lock(&(node->subscribe_rwlock));
 
     list_for_each_entry(ptr, &(node->pid_list_head), list){
         int len, i = 0;
-        char *str/*, *msg_ptr*/;
+        char *str;
         str = (char*)kmalloc(MAX_SIZE_PID, GFP_KERNEL);
         snprintf(str, MAX_SIZE_PID, "%d", ptr->pid);
-        //msg_ptr = str; 
     
         len = strlen(str);
 
@@ -490,8 +491,9 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
     put_user('\n', buffer++);
     bytes_read++;
 
+    atomic_set(&(node->subs_read_flag), TRUE);
+
     *offset += bytes_read; 
-    flag = 1;
     
     return bytes_read;
 }
@@ -690,12 +692,6 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     struct pid_node *pidNode;
     char *dentry, *msg_ptr;
 
-    if(flag) { /* we are at the end of message */
-        flag = 0; /* reset the flag */
-        *offset = 0; /* reset the offset */
-        return 0; /* signify end of file */
-    }
-
     dentry = filp->f_path.dentry->d_parent->d_iname;
     node = search_node(dentry);
     if(node==NULL){
@@ -707,6 +703,11 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     if(pidNode==NULL){
         pr_alert("ERROR: pid_node not found\n");
         return EFAULT;
+    }
+
+    if(atomic_read(&(pidNode->has_read)) == TRUE) { /* we are at the end of message */
+        *offset = 0; /* reset the offset */
+        return 0; /* signify end of file */
     }
 
     read_lock(&(node->endpoint_rwlock));
@@ -735,7 +736,6 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     read_unlock(&(node->endpoint_rwlock));
 
     *offset += bytes_read; 
-    flag = 1;  
 
     return bytes_read;
 }
