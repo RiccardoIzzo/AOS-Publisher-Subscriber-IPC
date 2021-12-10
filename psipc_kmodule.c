@@ -352,6 +352,8 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
         elem->devices[i] = MKDEV(created_sub, 0);
         device_create(cls, NULL, elem->devices[i], NULL, path); 
         elem->file_dev_cls[i] = *cls;
+
+        kfree(path);
     }
 
     set_files_ownership(msg);
@@ -365,8 +367,6 @@ static ssize_t new_topic_write(struct file *filp, const char __user *buff, size_
     write_unlock(&topic_list_rwlock);
 
     pr_info("Topic %s succesfully created.\n", elem->dir_name);
- 
-    msg[0] = '\0';
     
     return bytes_written; 
 }
@@ -435,8 +435,6 @@ static ssize_t subscribe_write(struct file *filp, const char __user *buff, size_
     pr_info("Process with pid %d has successfully subscribed to the topic %s\n", pid_node->pid, node->dir_name);
 
     write_unlock(&(node->subscribe_rwlock));
-
-    msg[0] = '\0';
     
     return bytes_written;
 }
@@ -469,21 +467,22 @@ static ssize_t subs_list_read(struct file *filp, char __user *buffer, size_t len
 
     list_for_each_entry(ptr, &(node->pid_list_head), list){
         int len, i = 0;
-        char *str, *msg_ptr;
+        char *str/*, *msg_ptr*/;
         str = (char*)kmalloc(MAX_SIZE_PID, GFP_KERNEL);
         snprintf(str, MAX_SIZE_PID, "%d", ptr->pid);
-        msg_ptr = str; 
+        //msg_ptr = str; 
     
         len = strlen(str);
 
         /* Actually put the data into the buffer */ 
         while (len > 0) { 
-            put_user(msg_ptr[i++], buffer++);
+            put_user(str[i++], buffer++);
             len--; 
             bytes_read++;
         } 
         put_user(' ', buffer++);
         bytes_read++;
+        kfree(str);
     }
 
     read_unlock(&(node->subscribe_rwlock));
@@ -538,7 +537,6 @@ static ssize_t signal_nr_write(struct file *filp, const char __user *buff, size_
     write_unlock(&(node->signal_nr_rwlock));
 
     pr_info("Written signal: %d\n", node->signal_nr);
-    msg[0]='\0';
 
     return written_bytes;
 }
@@ -789,6 +787,10 @@ static void release_files(void){
                 if(entry_temp->message != NULL){
                     kfree(entry_temp->message);
                     pr_info("Endpoint message freed");
+                }
+
+                if(entry_temp->dir_name!=NULL){
+                    kfree(entry_temp->dir_name);
                 }
 
                 if(ptr1!=NULL){
