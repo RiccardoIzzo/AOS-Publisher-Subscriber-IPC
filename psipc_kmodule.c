@@ -123,7 +123,7 @@ static struct topic_node{
     char *message;                                  /* message written to endpoint */
     atomic_t is_reading;                            /* true if a signal has been sent. It goes back to false when publisher wants
                                                      * to write again a message. */
-    atomic_t subs_read_flag;
+    atomic_t subs_read_flag;                        /* atomic flag used in subs_list_read function */
 
     /* Concurrency */
     rwlock_t subscribe_rwlock;          /* read-write lock for interaction between read operations on subscribers_list file 
@@ -137,14 +137,14 @@ static struct topic_node{
 /* pid_node struct is a node in the list of subscribers' pids to a specific topic_node */
 static struct pid_node{
     int pid;                    /* pid of the subscriber */
-    atomic_t has_been_notified; /* indicates if the subscriber has already been notified with the signal */
-    atomic_t has_read;          /* indicates if the subscriber has already read the message*/
+    atomic_t has_been_notified; /* atomic flag, indicates if the subscriber has already been notified with the signal */
+    atomic_t has_read;          /* atomic flag, indicates if the subscriber has already read the message*/
     struct list_head list;
 };
 
 static struct list_head topic_list_head; /* head of list of struct topic_node */
 
-static int major;         /* major number of the device file */
+static int major;           /* major number of the device file */
 static char msg[BUF_LEN+1]; /* the msg the device will give when asked */ 
  
 static struct class *new_topic_cls; 
@@ -673,7 +673,7 @@ static ssize_t endpoint_write(struct file *filp, const char __user *buff, size_t
     write_unlock(&(node->endpoint_rwlock));
     read_unlock(&(node->signal_nr_rwlock));
 
-    /*Truncation of message*/
+    /* truncation of a message larger than the maximum buffer size */
     if(len > BUF_LEN){
         pr_alert("Message has been truncated because it is too long. Max %d characters per message.\n", BUF_LEN);
         written_bytes= len;
@@ -719,7 +719,7 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
         bytes_read++;
     }
     else{
-        /* Actually put the data into the buffer */ 
+        /* actually put the data into the buffer */ 
         while (len > 0) { 
             put_user(msg_ptr[i++], buffer++);
             len--; 
@@ -792,7 +792,7 @@ static void release_files(void){
                 if(entry_temp->dir_name!=NULL){
                     kfree(entry_temp->dir_name);
                 }
-
+                /* delete the topic node */
                 if(ptr1!=NULL){
                     list_del(ptr1);
                 }else
@@ -851,7 +851,6 @@ static struct pid_node* search_pid_node(struct list_head *head){
 */
 static int pid_atoi(char *s){
     int n=0, i;
-    pr_info("Pid to convert is %s\n", s);
     for(i=0; s[i]!='\0'; i++){
         if(s[i]<'0'  || s[i]>'9'){
             pr_alert("ERROR: %s is not a number\n", s);
@@ -859,7 +858,6 @@ static int pid_atoi(char *s){
         }
         n = n*10 + (s[i] - '0');
     }
-    pr_info("Converted pid is %d\n", n);
     return n;
 }
 
