@@ -728,7 +728,7 @@ static ssize_t endpoint_read(struct file *filp, char __user *buffer, size_t leng
     }
 
     /* it's the first time for this pid reading this current message*/
-    if(atomic_read(&(pidNode->has_read)) == FALSE){
+    if(!atomic_read(&(pidNode->has_read)) && atomic_read(&(pidNode->has_been_notified))){
         atomic_set(&(pidNode->has_read), TRUE);
         node->n_read++;
     }
@@ -851,7 +851,7 @@ static struct pid_node* search_pid_node(struct list_head *head){
 */
 static int pid_atoi(char *s){
     int n=0, i;
-
+    pr_info("Pid to convert is %s\n", s);
     for(i=0; s[i]!='\0'; i++){
         if(s[i]<'0'  || s[i]>'9'){
             pr_alert("ERROR: %s is not a number\n", s);
@@ -859,6 +859,7 @@ static int pid_atoi(char *s){
         }
         n = n*10 + (s[i] - '0');
     }
+    pr_info("Converted pid is %d\n", n);
     return n;
 }
 
@@ -868,7 +869,7 @@ static int pid_atoi(char *s){
 static int signal_atoi(char *s){
     int n=0, i;
     char negative_flag = '0'; /* 0: positive number, 1: negative number */
-
+   
     for(i=0; s[i]!='\0'; i++){
         if((s[i]!='-' && (s[i]<'0' || s[i]>'9')) || (s[i]=='-' && i!=0)){
             pr_alert("ERROR: %s is not a number\n", s);
