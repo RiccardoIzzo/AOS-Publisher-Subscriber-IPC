@@ -761,15 +761,18 @@ static void release_files(void){
         list_for_each_safe(ptr1, temp1, &topic_list_head){
             entry_temp = list_entry(ptr1, struct topic_node, list);
             if(entry_temp!=NULL){
+                write_lock(&(entry_temp->subscribe_rwlock));
                 if(!list_empty(&(entry_temp->pid_list_head))){
                     /* delete the list of pids */
                     list_for_each_safe(ptr2, temp2, &(entry_temp->pid_list_head)){
-                        list_del(ptr2);
+                        if(ptr2!=NULL){
+                            list_del(ptr2);
+                        }
                     }
                 }else{
-                    pr_info("No pid list to free\n");
+                    pr_info("Release_files: No pid list to free\n");
                 }
-                pr_info("All pid freed\n");
+                pr_info("Release_files: All pid freed\n");
 
                 /* delete the four device files */
                 for(n_files=0; n_files < NUM_SPECIAL_FILES; n_files++){
@@ -784,14 +787,18 @@ static void release_files(void){
                 }
                 
                 /* delete the message written in endpoint */
+                write_lock(&(entry_temp->endpoint_rwlock));
                 if(entry_temp->message != NULL){
                     kfree(entry_temp->message);
-                    pr_info("Endpoint message freed");
                 }
 
                 if(entry_temp->dir_name!=NULL){
                     kfree(entry_temp->dir_name);
                 }
+
+                write_unlock(&(entry_temp->endpoint_rwlock));
+                write_unlock(&(entry_temp->subscribe_rwlock));
+                
                 /* delete the topic node */
                 if(ptr1!=NULL){
                     list_del(ptr1);
@@ -799,10 +806,10 @@ static void release_files(void){
                     pr_alert("ERROR: no pointer to free\n");
             }else
                 pr_alert("ERROR: null entry\n");
-        }
-
-        write_unlock(&topic_list_rwlock);
+        }     
     }
+    write_unlock(&topic_list_rwlock);
+    return;
 }
 
 /*
